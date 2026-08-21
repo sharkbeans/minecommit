@@ -3,6 +3,7 @@ use log::{LevelFilter, Log, Metadata, Record};
 use minecommit::{
     sync::{
         backup_message_with_device, lock_inactive_world, restore_commit, RemoteStatus, RemoteSync,
+        DEFAULT_BRANCH,
     },
     utils::cmd::{git_cmd, git_count_objects, git_repack},
     Config,
@@ -888,6 +889,212 @@ fn derive_save_info(path: String) -> Result<DeriveSaveInfo, AppError> {
     Ok(DeriveSaveInfo { name, repo_path })
 }
 
+/// List the branches that actually exist in a cloud repository.
+///
+/// Cloud setup offers these instead of a free-text field, so a branch cannot be
+/// typed slightly wrong and then silently resolve to "no backups yet".
+#[tauri::command]
+async fn list_remote_branches(remote_url: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        RemoteSync::list_remote_branches(&remote_url).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| format!("Failed to list cloud branches: {e}"))?
+}
+
+/// Branches that already hold backups in a world's local repository.
+///
+/// Lets the UI catch a world whose history lives on one branch while the cloud
+/// is being pointed at another, which otherwise looks the same as having no
+/// backups at all.
+#[tauri::command]
+fn list_local_branches(repo_path: String) -> Result<Vec<String>, String> {
+    let sync = RemoteSync::new(PathBuf::from(&repo_path), DEFAULT_BRANCH)
+        .map_err(|e| format!("{e:#}"))?;
+    sync.local_branches().map_err(|e| format!("{e:#}"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloneFromCloudResult {
+    pub success: bool,
+    pub error: Option<String>,
+    pub save: Option<Save>,
+}
+
+/// Create a brand new world on this computer from an existing cloud backup.
+///
+/// This is the entry point for a second computer that has never held the world:
+/// there is nothing on disk to select, so the save is built from the cloud
+/// instead. The bare repository is created beside the destination, pointed at
+/// the remote, and the newest backup on the chosen branch is restored into a
+/// save folder that does not exist yet.
+#[tauri::command]
+async fn clone_save_from_cloud(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    name: String,
+    save_path: String,
+    remote_url: String,
+    branch: String,
+) -> Result<CloneFromCloudResult, String> {
+    init_logger();
+    take_logs();
+
+    let name = name.trim().to_string();
+    let save_path = save_path.trim().to_string();
+    let remote_url = remote_url.trim().to_string();
+    let branch = branch.trim().to_string();
+    if name.is_empty() || save_path.is_empty() || remote_url.is_empty() || branch.is_empty() {
+        return Ok(CloneFromCloudResult {
+            success: false,
+            error: Some("World name, location, cloud address and branch are all required".into()),
+            save: None,
+        });
+    }
+    if state.saves.lock().unwrap().iter().any(|s| s.name == name) {
+        return Ok(CloneFromCloudResult {
+            success: false,
+            error: Some(format!("A save named \"{name}\" already exists")),
+            save: None,
+        });
+    }
+
+    let save_dir = PathBuf::from(&save_path);
+    if save_dir.exists() {
+        return Ok(CloneFromCloudResult {
+            success: false,
+            error: Some(format!(
+                "{save_path} already exists. Choose a folder that does not exist yet, so an \
+                 existing world cannot be overwritten."
+            )),
+            save: None,
+        });
+    }
+    let repo_path = match save_dir.parent() {
+        Some(parent) => parent.join(format!("{name}.git")),
+        None => {
+            return Ok(CloneFromCloudResult {
+                success: false,
+                error: Some(format!("Invalid destination: {save_path}")),
+                save: None,
+            });
+        }
+    };
+
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = running.clone();
+    let app_clone = app.clone();
+    let log_task = tauri::async_runtime::spawn_blocking(move || {
+        while running_clone.load(Ordering::Relaxed) {
+            for entry in &take_logs() {
+                let _ = app_clone.emit("commit-log", entry);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        for entry in &take_logs() {
+            let _ = app_clone.emit("commit-log", entry);
+        }
+    });
+
+    let repo_for_task = repo_path.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        clone_worker(&repo_for_task, &save_dir, &remote_url, &branch)
+    })
+    .await;
+
+    running.store(false, Ordering::Relaxed);
+    let _ = log_task.await;
+    let _ = app.emit("commit-finished", ());
+
+    let outcome = match outcome {
+        Ok(result) => result,
+        Err(e) => Err(format!("Join error: {e}")),
+    };
+    let (remote_url, branch) = match outcome {
+        Ok(pair) => pair,
+        Err(message) => {
+            // Nothing was restored, so leave no half-created repository behind.
+            let _ = fs::remove_dir_all(&repo_path);
+            log::error!("{message}");
+            return Ok(CloneFromCloudResult {
+                success: false,
+                error: Some(message),
+                save: None,
+            });
+        }
+    };
+
+    let mut saves = state.saves.lock().unwrap();
+    let save = Save {
+        name,
+        path: save_path,
+        repo_path: repo_path.to_string_lossy().to_string(),
+        remote_repo_path: remote_url,
+        last_access: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        default_branch: branch,
+    };
+    saves.push(save.clone());
+    if let Err(e) = save_saves(&state.data_dir, &saves) {
+        return Ok(CloneFromCloudResult {
+            success: false,
+            error: Some(format!("{e}")),
+            save: None,
+        });
+    }
+    Ok(CloneFromCloudResult {
+        success: true,
+        error: None,
+        save: Some(save),
+    })
+}
+
+/// Blocking half of [`clone_save_from_cloud`]. Returns the remote and branch on
+/// success so the caller can record them.
+fn clone_worker(
+    repo_path: &Path,
+    save_dir: &Path,
+    remote_url: &str,
+    branch: &str,
+) -> Result<(String, String), String> {
+    if let Some(parent) = repo_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to make parent directory: {e}"))?;
+    }
+    log::info!("Creating local backup repository for cloud world");
+    let init = Command::new("git")
+        .args([
+            "init",
+            "--bare",
+            &format!("--initial-branch={branch}"),
+            &repo_path.to_string_lossy(),
+        ])
+        .output()
+        .map_err(|e| format!("Failed to initialize repository: {e}"))?;
+    if !init.status.success() {
+        return Err(format!(
+            "Failed to initialize repository: {}",
+            String::from_utf8_lossy(&init.stderr).trim()
+        ));
+    }
+
+    let sync = RemoteSync::new(repo_path.to_path_buf(), branch).map_err(|e| format!("{e:#}"))?;
+    sync.configure_remote(remote_url)
+        .map_err(|e| format!("{e:#}"))?;
+
+    // Fetch, fast-forward the empty local branch onto the cloud tip, and
+    // reconstruct the world. `restore_commit` creates a save directory that
+    // does not exist yet, which is exactly this case.
+    let result = sync
+        .sync_before_playing(save_dir)
+        .map_err(|e| format!("{e:#}"))?;
+    if !result.restored {
+        return Err(format!(
+            "Cloud branch '{branch}' has no backups to download yet."
+        ));
+    }
+    log::info!("Downloaded cloud world into {save_dir:?}");
+    Ok((remote_url.to_string(), branch.to_string()))
+}
+
 #[tauri::command]
 fn delete_save(
     state: tauri::State<AppState>,
@@ -954,6 +1161,9 @@ pub fn run() {
             perform_push,
             perform_pull,
             get_cloud_status,
+            list_remote_branches,
+            list_local_branches,
+            clone_save_from_cloud,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

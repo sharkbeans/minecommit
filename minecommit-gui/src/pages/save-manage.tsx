@@ -44,7 +44,13 @@ import { Label } from "@/components/ui/label"
 import { SaveHoverCard } from "@/components/save-hover-card"
 import { useI18n } from "@/contexts/i18n"
 
-function EmptySave({ onAddTrack }: { onAddTrack: () => void }) {
+function EmptySave({
+  onAddTrack,
+  onDownload,
+}: {
+  onAddTrack: () => void
+  onDownload: () => void
+}) {
   const { t } = useI18n()
 
   return (
@@ -60,9 +66,212 @@ function EmptySave({ onAddTrack }: { onAddTrack: () => void }) {
         </EmptyDescription>
       </EmptyHeader>
       <EmptyContent>
-        <Button onClick={onAddTrack}>{t("worlds.add")}</Button>
+        <div className="flex flex-wrap justify-center gap-2">
+          <Button onClick={onAddTrack}>{t("worlds.add")}</Button>
+          <Button variant="outline" onClick={onDownload}>
+            {t("cloudClone.action")}
+          </Button>
+        </div>
       </EmptyContent>
     </Empty>
+  )
+}
+
+type CloudCloneStep = "address" | "details" | "downloading"
+
+/// Create a world on this computer from a cloud backup.
+///
+/// A second computer has nothing on disk to select, so the world is built from
+/// the cloud instead of the other way round.
+function DownloadFromCloudDialog({
+  open,
+  onOpenChange,
+  onSaveAdded,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onSaveAdded: () => void
+}) {
+  const { t } = useI18n()
+  const [step, setStep] = useState<CloudCloneStep>("address")
+  const [remoteUrl, setRemoteUrl] = useState("")
+  const [branches, setBranches] = useState<string[]>([])
+  const [branch, setBranch] = useState("")
+  const [name, setName] = useState("")
+  const [parentDir, setParentDir] = useState("")
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+
+  function resetAll() {
+    setStep("address")
+    setRemoteUrl("")
+    setBranches([])
+    setBranch("")
+    setName("")
+    setParentDir("")
+    setError("")
+    setBusy(false)
+  }
+
+  function handleOpenChange(next: boolean) {
+    if (!next) resetAll()
+    onOpenChange(next)
+  }
+
+  // Branches come from the repository itself, so one cannot be typed slightly
+  // wrong and then silently resolve to "no backups yet".
+  async function handleLookupBranches() {
+    setBusy(true)
+    setError("")
+    try {
+      const found = await invoke<string[]>("list_remote_branches", {
+        remoteUrl: remoteUrl.trim(),
+      })
+      if (found.length === 0) {
+        setError(t("cloudClone.noBranches"))
+        return
+      }
+      setBranches(found)
+      setBranch(found.includes("main") ? "main" : found[0])
+      setStep("details")
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleChooseParent() {
+    try {
+      const selected = await openFolderDialog({
+        directory: true,
+        multiple: false,
+        title: t("cloudClone.chooseParent"),
+      })
+      if (typeof selected === "string") setParentDir(selected)
+    } catch (err) {
+      setError(String(err))
+    }
+  }
+
+  async function handleDownload() {
+    if (!name.trim() || !parentDir.trim() || !branch) return
+    setBusy(true)
+    setError("")
+    setStep("downloading")
+    try {
+      const savePath = `${parentDir.replace(/[/\\]+$/, "")}/${name.trim()}`
+      const result = await invoke<{ success: boolean; error: string | null }>(
+        "clone_save_from_cloud",
+        { name: name.trim(), savePath, remoteUrl: remoteUrl.trim(), branch }
+      )
+      if (!result.success) {
+        setError(result.error ?? t("cloudClone.failed"))
+        setStep("details")
+        return
+      }
+      onOpenChange(false)
+      resetAll()
+      onSaveAdded()
+    } catch (err) {
+      setError(String(err))
+      setStep("details")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{t("cloudClone.title")}</DialogTitle>
+          <DialogDescription>{t("cloudClone.description")}</DialogDescription>
+        </DialogHeader>
+
+        {step === "address" && (
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="clone-url">{t("cloudClone.address")}</FieldLabel>
+              <Input
+                id="clone-url"
+                value={remoteUrl}
+                placeholder="https://github.com/you/my-world.git"
+                onChange={(e) => setRemoteUrl(e.target.value)}
+              />
+            </Field>
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <DialogFooter>
+              <Button
+                onClick={() => void handleLookupBranches()}
+                disabled={busy || !remoteUrl.trim()}
+              >
+                {busy ? t("cloudClone.checking") : t("cloudClone.next")}
+              </Button>
+            </DialogFooter>
+          </FieldGroup>
+        )}
+
+        {step === "details" && (
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="clone-branch">{t("cloudClone.branch")}</FieldLabel>
+              <Select value={branch} onValueChange={(value) => setBranch(value ?? "")}>
+                <SelectTrigger id="clone-branch">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {branches.map((b) => (
+                    <SelectItem key={b} value={b}>
+                      {b}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="clone-name">{t("cloudClone.worldName")}</FieldLabel>
+              <Input
+                id="clone-name"
+                value={name}
+                placeholder="My World"
+                onChange={(e) => setName(e.target.value)}
+              />
+            </Field>
+            <Field>
+              <FieldLabel>{t("cloudClone.location")}</FieldLabel>
+              <div className="flex gap-2">
+                <Input value={parentDir} readOnly placeholder={t("cloudClone.locationHint")} />
+                <Button type="button" variant="outline" onClick={() => void handleChooseParent()}>
+                  <FolderOpen />
+                </Button>
+              </div>
+            </Field>
+            {name.trim() && parentDir && (
+              <p className="text-xs break-all text-muted-foreground">
+                {parentDir.replace(/[/\\]+$/, "")}/{name.trim()}
+              </p>
+            )}
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setStep("address")}>
+                {t("cloudClone.back")}
+              </Button>
+              <Button
+                onClick={() => void handleDownload()}
+                disabled={busy || !name.trim() || !parentDir}
+              >
+                {t("cloudClone.download")}
+              </Button>
+            </DialogFooter>
+          </FieldGroup>
+        )}
+
+        {step === "downloading" && (
+          <p className="py-6 text-sm text-muted-foreground">{t("cloudClone.downloading")}</p>
+        )}
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -422,6 +631,7 @@ export function SaveManagePage() {
   const { saves, loaded, refreshSaves } = useSaves()
   const { t } = useI18n()
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [cloneDialogOpen, setCloneDialogOpen] = useState(false)
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [deleteRepoChecked, setDeleteRepoChecked] = useState(false)
@@ -452,7 +662,12 @@ export function SaveManagePage() {
               <CardTitle>{t("worlds.listTitle")}</CardTitle>
             </div>
             {saves.length > 0 && (
-              <Button onClick={() => setDialogOpen(true)}>{t("worlds.add")}</Button>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={() => setCloneDialogOpen(true)}>
+                  {t("cloudClone.action")}
+                </Button>
+                <Button onClick={() => setDialogOpen(true)}>{t("worlds.add")}</Button>
+              </div>
             )}
           </div>
         </CardHeader>
@@ -461,7 +676,10 @@ export function SaveManagePage() {
           {!loaded ? (
             <p className="text-sm text-muted-foreground">{t("worlds.loading")}</p>
           ) : saves.length === 0 ? (
-            <EmptySave onAddTrack={() => setDialogOpen(true)} />
+            <EmptySave
+              onAddTrack={() => setDialogOpen(true)}
+              onDownload={() => setCloneDialogOpen(true)}
+            />
           ) : (
             <Table className="table-fixed">
               <TableHeader>
@@ -509,6 +727,11 @@ export function SaveManagePage() {
         </CardContent>
       </Card>
 
+      <DownloadFromCloudDialog
+        open={cloneDialogOpen}
+        onOpenChange={setCloneDialogOpen}
+        onSaveAdded={() => void refreshSaves()}
+      />
       <AddTrackDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
