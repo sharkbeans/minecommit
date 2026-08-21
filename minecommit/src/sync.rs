@@ -866,6 +866,38 @@ mod tests {
         fs::write(dir.join("session.lock"), b"\xe2\x98\x83").expect("write session.lock");
     }
 
+    /// A backup holds the world's session.lock for its whole duration to prove
+    /// Minecraft is not running. On Windows that lock is mandatory, so any
+    /// attempt to also read session.lock as part of the backup fails with a
+    /// lock violation. It must therefore be ignored, not stored.
+    #[test]
+    fn backup_succeeds_while_holding_the_world_session_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let save = dir.path().join("world");
+        write_minimal_save(&save);
+        let repo = init_bare();
+
+        let _lock = lock_inactive_world(&save).expect("lock the world like a real backup does");
+
+        let unprocessed = Config::new(save.clone(), repo.path().to_path_buf(), vec![], vec![])
+            .commit(
+                vec![],
+                "backup",
+                Some("refs/heads/main".to_string()),
+                Some("MineCommit Test"),
+                Some("test@example.com"),
+            )
+            .expect("backup must not fail while the session lock is held");
+        assert!(unprocessed.is_empty(), "unhandled files: {unprocessed:?}");
+
+        let stored = git(repo.path(), &["ls-tree", "-r", "--name-only", "refs/heads/main"]);
+        assert!(
+            !stored.contains("session.lock"),
+            "session.lock must not be stored, got:\n{stored}"
+        );
+        assert!(stored.contains("level.dat"), "level.dat must be stored");
+    }
+
     /// Restoring on top of a live world has to move the old save aside. On
     /// Windows that rename fails with "Access is denied" if any handle inside
     /// the directory is still open, and MineCommit holds the world's own
@@ -902,7 +934,9 @@ mod tests {
         let backup = result.backup_path.expect("existing world must be preserved");
         assert!(backup.join("level.dat").is_file(), "snapshot keeps old save");
         assert!(save.join("level.dat").is_file(), "world was restored");
-        assert!(save.join("session.lock").is_file());
+        // session.lock is deliberately not stored or restored; Minecraft
+        // recreates it the next time the world is opened.
+        assert!(!save.join("session.lock").exists());
     }
 
     #[test]

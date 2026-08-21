@@ -21,9 +21,6 @@ const RAW_GLOB_PATTERNS: &[&str] = &[
     // with an additional gzip suffix. Preserve them byte-for-byte rather than
     // treating them as unhandled files.
     "**/*.dat_old*.gz",
-    // Worlds are sometimes distributed with another save nested inside them,
-    // so match every session.lock rather than only the one at the save root.
-    "**/session.lock",
 ];
 
 pub(crate) struct RawHandler {
