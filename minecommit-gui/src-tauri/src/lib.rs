@@ -1,6 +1,9 @@
 use chrono::Local;
 use log::{LevelFilter, Log, Metadata, Record};
 use minecommit::{
+    sync::{
+        backup_message_with_device, lock_inactive_world, restore_commit, RemoteStatus, RemoteSync,
+    },
     utils::cmd::{git_cmd, git_count_objects, git_repack},
     Config,
 };
@@ -26,6 +29,8 @@ pub enum AppError {
     SaveNotFound(String),
     #[error("Invalid path: {0}")]
     InvalidUTF8(String),
+    #[error("Git error: {0}")]
+    Git(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +167,24 @@ async fn perform_commit(
         let git_dir_path = PathBuf::from(&git_dir);
         let save_dir_path = PathBuf::from(&save_dir);
 
+        // A held session.lock means Minecraft may still be writing the world.
+        // Keep the lock for the whole flatten/commit operation.
+        let _world_lock = match lock_inactive_world(&save_dir_path) {
+            Ok(lock) => lock,
+            Err(e) => {
+                let msg = format!("{e:#}");
+                log::error!("{msg}");
+                return PerformCommitResult {
+                    success: false,
+                    logs: vec![],
+                    error: Some(msg),
+                    size_before_mib: None,
+                    size_after_mib: None,
+                    size_change_pct: None,
+                };
+            }
+        };
+
         // 1. Resolve parents
         let parents = {
             match git_cmd(&git_dir_path, ["rev-parse", &format!("{branch}^{{commit}}")]).output() {
@@ -202,7 +225,7 @@ async fn perform_commit(
         )
         .commit(
             parents,
-            &message,
+            &backup_message_with_device(&message),
             Some(r#ref),
             a_name,
             a_email,
@@ -326,11 +349,22 @@ pub struct PerformRestoreResult {
     pub error: Option<String>,
 }
 
+fn sync_error_result(error: anyhow::Error) -> PerformRestoreResult {
+    let message = format!("{error:#}");
+    log::error!("{message}");
+    PerformRestoreResult {
+        success: false,
+        logs: vec![],
+        error: Some(message),
+    }
+}
+
 #[tauri::command]
 async fn perform_restore(
     app: tauri::AppHandle,
     save_dir: String,
     git_dir: String,
+    branch: String,
 ) -> PerformRestoreResult {
     init_logger();
     take_logs(); // drain stale logs
@@ -359,31 +393,14 @@ async fn perform_restore(
         let save_dir_path = PathBuf::from(&save_dir);
         let git_dir_path = PathBuf::from(&git_dir);
 
-        // If the save directory already exists, rename it to a timestamped snapshot
-        if save_dir_path.exists() {
-            let ts = Local::now().format("%Y-%m-%d_%H-%M-%S");
-            let bak = save_dir_path.with_extension(format!("{ts}.snapshot"));
-            log::warn!(
-                "save_dir {:?} already exists, renaming to {:?}",
-                save_dir_path,
-                bak
-            );
-            if let Err(e) = fs::rename(&save_dir_path, &bak) {
-                let msg = format!("Failed to rename existing save directory: {e}");
-                log::error!("{msg}");
-                return PerformRestoreResult {
-                    success: false,
-                    logs: vec![],
-                    error: Some(msg),
-                };
-            }
-        }
+        let commit = format!("refs/heads/{branch}");
+        log::info!("Restoring save from '{branch}' using staged checkout...");
 
-        log::info!("Restoring save from HEAD...");
-
-        match Config::new(save_dir_path, git_dir_path, vec![], vec![]).checkout("HEAD".to_string())
-        {
-            Ok(()) => {
+        match restore_commit(&save_dir_path, &git_dir_path, &commit) {
+            Ok(result) => {
+                if let Some(backup) = result.backup_path {
+                    log::info!("Existing save preserved at {backup:?}");
+                }
                 log::info!("Restore completed successfully");
                 PerformRestoreResult {
                     success: true,
@@ -448,51 +465,27 @@ async fn perform_push(
     });
 
     let result = tauri::async_runtime::spawn_blocking(move || {
-        log::info!("Pushing branch '{branch}' to remote '{remote}'...");
-
-        let output = Command::new("git")
-            .args(["--git-dir", &git_dir, "push", &remote, &branch])
-            .output();
-
-        match output {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                for line in stdout.lines().filter(|l| !l.is_empty()) {
-                    log::info!("{line}");
-                }
-                for line in stderr.lines().filter(|l| !l.is_empty()) {
-                    if out.status.success() {
-                        log::info!("{line}");
-                    } else {
-                        log::error!("{line}");
-                    }
-                }
-                if out.status.success() {
-                    log::info!("Push completed successfully");
-                    PerformRestoreResult {
-                        success: true,
-                        logs: vec![],
-                        error: None,
-                    }
-                } else {
-                    let msg = stderr.trim().to_string();
-                    PerformRestoreResult {
-                        success: false,
-                        logs: vec![],
-                        error: Some(msg),
-                    }
-                }
+        let sync = match RemoteSync::new(PathBuf::from(&git_dir), &branch) {
+            Ok(sync) => sync,
+            Err(e) => return sync_error_result(e),
+        };
+        if !remote.trim().is_empty() {
+            if let Err(e) = sync.configure_remote(&remote) {
+                return sync_error_result(e);
             }
-            Err(e) => {
-                let msg = format!("Failed to run git push: {e}");
-                log::error!("{msg}");
+        }
+        log::info!("Checking cloud branch '{branch}' before push...");
+        match sync.push() {
+            Ok(status) => {
+                log::info!("{}", status.state.description());
+                log::info!("Cloud push completed safely without force");
                 PerformRestoreResult {
-                    success: false,
+                    success: true,
                     logs: vec![],
-                    error: Some(msg),
+                    error: None,
                 }
             }
+            Err(e) => sync_error_result(e),
         }
     })
     .await;
@@ -511,6 +504,7 @@ async fn perform_push(
 #[tauri::command]
 async fn perform_pull(
     app: tauri::AppHandle,
+    save_dir: String,
     git_dir: String,
     remote: String,
     branch: String,
@@ -537,51 +531,32 @@ async fn perform_pull(
     });
 
     let result = tauri::async_runtime::spawn_blocking(move || {
-        log::info!("Fetching branch '{branch}' from remote '{remote}'...");
-
-        let output = Command::new("git")
-            .args(["--git-dir", &git_dir, "fetch", &remote, &branch])
-            .output();
-
-        match output {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                for line in stdout.lines().filter(|l| !l.is_empty()) {
-                    log::info!("{line}");
-                }
-                for line in stderr.lines().filter(|l| !l.is_empty()) {
-                    if out.status.success() {
-                        log::info!("{line}");
-                    } else {
-                        log::error!("{line}");
-                    }
-                }
-                if out.status.success() {
-                    log::info!("Fetch completed successfully");
-                    PerformRestoreResult {
-                        success: true,
-                        logs: vec![],
-                        error: None,
-                    }
-                } else {
-                    let msg = stderr.trim().to_string();
-                    PerformRestoreResult {
-                        success: false,
-                        logs: vec![],
-                        error: Some(msg),
-                    }
-                }
+        let sync = match RemoteSync::new(PathBuf::from(&git_dir), &branch) {
+            Ok(sync) => sync,
+            Err(e) => return sync_error_result(e),
+        };
+        if !remote.trim().is_empty() {
+            if let Err(e) = sync.configure_remote(&remote) {
+                return sync_error_result(e);
             }
-            Err(e) => {
-                let msg = format!("Failed to run git fetch: {e}");
-                log::error!("{msg}");
+        }
+        log::info!("Checking cloud branch '{branch}' before playing...");
+        match sync.sync_before_playing(PathBuf::from(&save_dir)) {
+            Ok(result) => {
+                if result.restored {
+                    log::info!("Newer cloud backup restored safely");
+                    if let Some(backup) = result.backup_path {
+                        log::info!("Existing save preserved at {backup:?}");
+                    }
+                }
+                log::info!("{}", result.status.state.description());
                 PerformRestoreResult {
-                    success: false,
+                    success: true,
                     logs: vec![],
-                    error: Some(msg),
+                    error: None,
                 }
             }
+            Err(e) => sync_error_result(e),
         }
     })
     .await;
@@ -595,6 +570,22 @@ async fn perform_pull(
         logs: vec![],
         error: Some(format!("Join error: {e}")),
     })
+}
+
+/// Fetch on demand and expose the exact safe-sync relationship to the React
+/// frontend. Authentication and network failures are intentionally returned
+/// as errors so the UI can show them without guessing from Git state.
+#[tauri::command]
+fn get_cloud_status(
+    git_dir: String,
+    branch: String,
+    refresh: bool,
+) -> Result<RemoteStatus, String> {
+    let sync = RemoteSync::new(PathBuf::from(git_dir), branch).map_err(|e| format!("{e:#}"))?;
+    if refresh {
+        sync.fetch().map_err(|e| format!("{e:#}"))?;
+    }
+    sync.status().map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -716,6 +707,13 @@ fn add_save(
         return Err(AppError::DuplicateName(name));
     }
 
+    if !remote_repo_path.trim().is_empty() {
+        let sync = RemoteSync::new(PathBuf::from(&repo_path), &default_branch)
+            .map_err(|e| AppError::Git(format!("{e:#}")))?;
+        sync.configure_remote(&remote_repo_path)
+            .map_err(|e| AppError::Git(format!("{e:#}")))?;
+    }
+
     let save = Save {
         name,
         path,
@@ -727,6 +725,43 @@ fn add_save(
     saves.push(save.clone());
     save_saves(&state.data_dir, &saves)?;
     Ok(save)
+}
+
+/// Connect an already-tracked world to its private cloud repository. This
+/// keeps the display settings and the bare Git repository configuration in
+/// sync, while Git continues to own authentication.
+#[tauri::command]
+fn configure_save_cloud(
+    state: tauri::State<AppState>,
+    name: String,
+    remote_url: String,
+    branch: String,
+) -> Result<Save, AppError> {
+    let remote_url = remote_url.trim().to_string();
+    let branch = branch.trim().to_string();
+    if remote_url.is_empty() {
+        return Err(AppError::Git("Cloud repository address is required".to_string()));
+    }
+    if branch.is_empty() {
+        return Err(AppError::Git("Cloud branch is required".to_string()));
+    }
+
+    let mut saves = state.saves.lock().unwrap();
+    let save = saves
+        .iter_mut()
+        .find(|save| save.name == name)
+        .ok_or_else(|| AppError::SaveNotFound(name.clone()))?;
+
+    let sync = RemoteSync::new(PathBuf::from(&save.repo_path), &branch)
+        .map_err(|e| AppError::Git(format!("{e:#}")))?;
+    sync.configure_remote(&remote_url)
+        .map_err(|e| AppError::Git(format!("{e:#}")))?;
+
+    save.remote_repo_path = remote_url;
+    save.default_branch = branch;
+    let configured = save.clone();
+    save_saves(&state.data_dir, &saves)?;
+    Ok(configured)
 }
 
 #[tauri::command]
@@ -897,6 +932,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_saves,
             add_save,
+            configure_save_cloud,
             delete_save,
             derive_save_info,
             access_save,
@@ -910,6 +946,7 @@ pub fn run() {
             perform_restore,
             perform_push,
             perform_pull,
+            get_cloud_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

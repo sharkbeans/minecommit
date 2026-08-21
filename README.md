@@ -141,6 +141,35 @@ Options:
 
 ### Additional Commands
 
+#### Cloud Sync (Vanilla Minecraft, Safe Fast-Forwards Only)
+
+MineCommit can synchronize its existing **bare** backup repository with any normal Git remote, including a private GitHub repository. Minecraft itself remains a normal vanilla Java installation and the world remains under `.minecraft/saves`.
+
+The desktop app includes a first-time wizard for people who do not use Git: choose whether you already have a GitHub account, create an empty private repository, paste its HTTPS address, then create and upload the first backup. The cloud card shows the committed time and device for local and cloud backups; this metadata travels with each backup commit.
+
+For Linux Mint Debian Edition and other Debian-based distributions, download the `MineCommit-…-x86_64.deb` file from the GitHub Release and open it with the system package installer. The package declares Git as a dependency; the `.tar.gz` remains available for users who prefer a portable download.
+
+```sh
+# Associate a local MineCommit bare repository with a remote once.
+minecommit remote add $GIT_DIR git@github.com:YOUR_USER/my-world.git --branch main
+
+# After creating a local backup, safely upload it. This fetches first and never force-pushes.
+minecommit commit $SAVE_DIR $GIT_DIR --init --message "Initial cloud backup"
+minecommit push $GIT_DIR --branch main
+
+# On another computer: initialise an empty bare repo, add the same remote,
+# then fetch, fast-forward, and restore the remote world.
+git init --initial-branch main --bare $GIT_DIR
+minecommit remote add $GIT_DIR git@github.com:YOUR_USER/my-world.git --branch main
+minecommit sync $SAVE_DIR $GIT_DIR --branch main
+```
+
+`minecommit sync` is the intended **sync-before-playing** action. It fetches the selected branch, compares it to the local bare-repository branch, and restores only when the remote is a fast-forward. `minecommit push` is the intended action after making a MineCommit backup; it fetches again before a normal non-force push.
+
+If both devices have changed since their common backup, MineCommit reports a divergence and stops. It never merges Minecraft histories automatically, never force-pushes, and keeps the existing local save as a timestamped `.snapshot` before a restore. Backup and restore also refuse to run while Minecraft holds the world's `session.lock`.
+
+Use Git Credential Manager for HTTPS or an SSH key for SSH remotes. MineCommit does not implement GitHub OAuth and rejects HTTPS URLs containing embedded credentials.
+
 <details>
 <summary>Flatten / Unflatten (without Git)</summary>
 

@@ -5,6 +5,9 @@ use clap::{Parser, Subcommand};
 use clap_verbosity_flag::{InfoLevel, Verbosity};
 use minecommit::{
     Config,
+    sync::{
+        backup_message_with_device, lock_inactive_world, restore_commit, RemoteSync, DEFAULT_BRANCH,
+    },
     utils::cmd::{git_cmd, git_count_objects, git_repack, git_repo_exists},
 };
 
@@ -42,7 +45,7 @@ enum CliSubcommand {
         #[arg(value_parser = git_repo_exists)]
         git_dir: PathBuf,
         /// Commit to this branch.
-        #[arg(short, long)]
+        #[arg(short, long, default_value = DEFAULT_BRANCH)]
         branch: String,
         /// Commit as initial commit.
         #[arg(long)]
@@ -70,11 +73,101 @@ enum CliSubcommand {
         #[arg(short, long)]
         commit: String,
     },
+    /// Configure and inspect the cloud Git remote for a bare MineCommit repository
+    Remote {
+        #[command(subcommand)]
+        action: RemoteSubcommand,
+    },
+    /// Fetch the configured cloud branch without changing the local Minecraft world
+    Fetch {
+        /// Path to the bare Git repository
+        #[arg(value_parser = git_repo_exists)]
+        git_dir: PathBuf,
+        /// Branch to fetch
+        #[arg(short, long, default_value = DEFAULT_BRANCH)]
+        branch: String,
+    },
+    /// Safely push local MineCommit backups after fetching and checking ancestry
+    Push {
+        /// Path to the bare Git repository
+        #[arg(value_parser = git_repo_exists)]
+        git_dir: PathBuf,
+        /// Branch to push
+        #[arg(short, long, default_value = DEFAULT_BRANCH)]
+        branch: String,
+    },
+    /// Fetch, fast-forward when safe, and restore a newer cloud backup
+    Pull {
+        /// Path to the local Minecraft save
+        save_dir: PathBuf,
+        /// Path to the bare Git repository
+        #[arg(value_parser = git_repo_exists)]
+        git_dir: PathBuf,
+        /// Branch to synchronize
+        #[arg(short, long, default_value = DEFAULT_BRANCH)]
+        branch: String,
+    },
+    /// Synchronize before playing: fetch, safely restore remote changes, and never merge
+    Sync {
+        /// Path to the local Minecraft save
+        save_dir: PathBuf,
+        /// Path to the bare Git repository
+        #[arg(value_parser = git_repo_exists)]
+        git_dir: PathBuf,
+        /// Branch to synchronize
+        #[arg(short, long, default_value = DEFAULT_BRANCH)]
+        branch: String,
+    },
     /// Utility tools for debug
     Utils {
         #[command(subcommand)]
         action: UtilsSubcommand,
     },
+}
+
+#[derive(Subcommand)]
+enum RemoteSubcommand {
+    /// Associate this MineCommit repository with a provider-agnostic Git remote URL
+    Add {
+        /// Path to the bare Git repository
+        #[arg(value_parser = git_repo_exists)]
+        git_dir: PathBuf,
+        /// HTTPS, SSH, or other Git remote URL
+        url: String,
+        /// Branch MineCommit will synchronize (defaults to main)
+        #[arg(short, long, default_value = DEFAULT_BRANCH)]
+        branch: String,
+    },
+    /// Show the last fetched relationship between local and cloud backups
+    Status {
+        /// Path to the bare Git repository
+        #[arg(value_parser = git_repo_exists)]
+        git_dir: PathBuf,
+        /// Branch to inspect
+        #[arg(short, long, default_value = DEFAULT_BRANCH)]
+        branch: String,
+    },
+}
+
+fn print_remote_status(status: &minecommit::sync::RemoteStatus) {
+    println!("Cloud status: {}", status.state.description());
+    println!(
+        "Remote: {}",
+        status.remote_url.as_deref().unwrap_or("(not configured)")
+    );
+    println!("Branch: {}", status.branch);
+    println!(
+        "Local backup: {} ({}, {})",
+        status.local_commit.as_deref().unwrap_or("(none)"),
+        status.local_timestamp.as_deref().unwrap_or("unknown time"),
+        status.local_device.as_deref().unwrap_or("unknown device"),
+    );
+    println!(
+        "Cloud backup: {} ({}, {})",
+        status.remote_commit.as_deref().unwrap_or("(not fetched or empty)"),
+        status.remote_timestamp.as_deref().unwrap_or("unknown time"),
+        status.remote_device.as_deref().unwrap_or("unknown device"),
+    );
 }
 
 #[derive(Subcommand)]
@@ -113,6 +206,9 @@ fn main() -> Result<(), anyhow::Error> {
             extra_patterns,
             ignore_patterns,
         } => {
+            // Hold Minecraft's session lock for the full read/commit operation.
+            // A stale lock file is fine; an actively held lock is not.
+            let _world_lock = lock_inactive_world(&save_dir)?;
             let parents = {
                 let mut cmd = git_cmd(&git_dir, ["rev-parse", &format!("{branch}^{{commit}}")]);
                 let out = cmd.output().context("failed to run git rev-parse")?;
@@ -145,7 +241,13 @@ fn main() -> Result<(), anyhow::Error> {
                 extra_patterns,
                 ignore_patterns,
             )
-            .commit(parents, &message, Some(r#ref), None, None)?;
+            .commit(
+                parents,
+                &backup_message_with_device(&message),
+                Some(r#ref),
+                None,
+                None,
+            )?;
             if !unprocessed.is_empty() {
                 for item in &unprocessed {
                     log::error!("Skipped file: {item}");
@@ -177,14 +279,65 @@ fn main() -> Result<(), anyhow::Error> {
             git_dir,
             commit,
         } => {
-            if save_dir.exists() {
-                let ts = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
-                let bak = save_dir.with_extension(format!("{ts}.snapshot"));
-                log::info!("save_dir {save_dir:?} already exists, renaming to {bak:?}");
-                std::fs::rename(&save_dir, &bak).context("failed to rename save directory")?;
+            let result = restore_commit(&save_dir, &git_dir, &commit)?;
+            if let Some(backup) = result.backup_path {
+                log::info!("Existing save preserved at {backup:?}");
             }
-            Config::new(save_dir, git_dir, vec![], vec![]).checkout(commit)?;
             log::info!("Done");
+            Ok(())
+        }
+
+        CliSubcommand::Remote { action } => match action {
+            RemoteSubcommand::Add {
+                git_dir,
+                url,
+                branch,
+            } => {
+                let sync = RemoteSync::new(git_dir, branch)?;
+                sync.configure_remote(&url)?;
+                print_remote_status(&sync.status()?);
+                Ok(())
+            }
+            RemoteSubcommand::Status { git_dir, branch } => {
+                let sync = RemoteSync::new(git_dir, branch)?;
+                print_remote_status(&sync.status()?);
+                Ok(())
+            }
+        },
+
+        CliSubcommand::Fetch { git_dir, branch } => {
+            let sync = RemoteSync::new(git_dir, branch)?;
+            sync.fetch()?;
+            print_remote_status(&sync.status()?);
+            Ok(())
+        }
+
+        CliSubcommand::Push { git_dir, branch } => {
+            let sync = RemoteSync::new(git_dir, branch)?;
+            let status = sync.push()?;
+            print_remote_status(&status);
+            Ok(())
+        }
+
+        CliSubcommand::Pull {
+            save_dir,
+            git_dir,
+            branch,
+        }
+        | CliSubcommand::Sync {
+            save_dir,
+            git_dir,
+            branch,
+        } => {
+            let sync = RemoteSync::new(git_dir, branch)?;
+            let result = sync.sync_before_playing(save_dir)?;
+            if result.restored {
+                if let Some(backup) = result.backup_path {
+                    log::info!("Existing save preserved at {backup:?}");
+                }
+                log::info!("Cloud backup was safely restored");
+            }
+            print_remote_status(&result.status);
             Ok(())
         }
 

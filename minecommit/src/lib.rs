@@ -10,6 +10,7 @@ use crate::{
 
 mod handler;
 pub mod odb;
+pub mod sync;
 pub mod utils;
 
 #[derive(Debug, Clone)]

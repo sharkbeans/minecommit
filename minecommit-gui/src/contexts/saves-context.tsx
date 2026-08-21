@@ -11,6 +11,15 @@ export function SavesProvider({ children }: { children: ReactNode }) {
     try {
       const data = await invoke<Save[]>("list_saves")
       setSaves(data)
+      setSelectedSave((current) => {
+        if (!current) {
+          const sorted = [...data].sort((a, b) =>
+            b.last_access.localeCompare(a.last_access)
+          )
+          return sorted[0] ?? null
+        }
+        return data.find((save) => save.name === current.name) ?? null
+      })
     } catch {
       // ignore
     } finally {

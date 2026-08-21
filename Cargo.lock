@@ -3417,6 +3417,7 @@ dependencies = [
  "flate2",
  "gix",
  "glob",
+ "libc",
  "log",
  "rayon",
  "serde",
@@ -3429,7 +3430,6 @@ name = "minecommit-cli"
 version = "0.3.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "clap-verbosity-flag",
  "env_logger",

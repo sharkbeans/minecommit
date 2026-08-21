@@ -80,7 +80,6 @@ function AddTrackDialog({
   const [name, setName] = useState("")
   const [path, setPath] = useState("")
   const [localRepoPath, setLocalRepoPath] = useState("")
-  const [remoteRepoPath, setRemoteRepoPath] = useState("")
   const [error, setError] = useState("")
   const [submitting, setSubmitting] = useState(false)
   const [initializing, setInitializing] = useState(false)
@@ -94,7 +93,6 @@ function AddTrackDialog({
     setName("")
     setPath("")
     setLocalRepoPath("")
-    setRemoteRepoPath("")
     setError("")
     setSubmitting(false)
     setSelecting(false)
@@ -128,7 +126,6 @@ function AddTrackDialog({
         setName(info.name)
         setPath(selected)
         setLocalRepoPath(info.repo_path)
-        setRemoteRepoPath("")
         setError("")
         setStep("confirm")
       }
@@ -168,7 +165,7 @@ function AddTrackDialog({
           name,
           path,
           repoPath: localRepoPath,
-          remoteRepoPath,
+          remoteRepoPath: "",
           defaultBranch: headRef,
         })
         onOpenChange(false)
@@ -196,7 +193,7 @@ function AddTrackDialog({
         name,
         path,
         repoPath: localRepoPath,
-        remoteRepoPath,
+        remoteRepoPath: "",
         defaultBranch: branchName,
       })
       onOpenChange(false)
@@ -217,7 +214,7 @@ function AddTrackDialog({
         name,
         path,
         repoPath: localRepoPath,
-        remoteRepoPath,
+        remoteRepoPath: "",
         defaultBranch,
       })
       onOpenChange(false)
@@ -300,26 +297,9 @@ function AddTrackDialog({
                   required
                 />
               </Field>
-              <Field>
-                <FieldLabel htmlFor="local-repo-path">本地仓库路径</FieldLabel>
-                <Input
-                  id="local-repo-path"
-                  placeholder="/home/user/.minecraft/minecommit/我的世界.git"
-                  value={localRepoPath}
-                  onChange={(e) => setLocalRepoPath(e.target.value)}
-                />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="remote-repo-path">
-                  远程仓库路径（可选）
-                </FieldLabel>
-                <Input
-                  id="remote-repo-path"
-                  placeholder="https://git.example.com/我的世界.git"
-                  value={remoteRepoPath}
-                  onChange={(e) => setRemoteRepoPath(e.target.value)}
-                />
-              </Field>
+              <p className="text-sm text-muted-foreground">
+                MineCommit 会在此设备上安全保存备份。添加后，你可以在存档主页启用云端备份。
+              </p>
               {error && <p className="text-sm text-destructive">{error}</p>}
             </FieldGroup>
             <DialogFooter className="mt-6">

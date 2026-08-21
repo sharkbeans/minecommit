@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "minecommit-gui",
+  "productName": "MineCommit",
   "version": "0.1.0",
   "identifier": "com.hlsvillager.minecommit-gui",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "minecommit-gui",
+        "title": "MineCommit — Minecraft World Backup",
         "width": 800,
         "height": 600
       }
@@ -24,6 +24,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "linux": {
+      "deb": {
+        "depends": ["git"]
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
