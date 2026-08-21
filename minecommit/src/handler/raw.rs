@@ -13,11 +13,17 @@ const RAW_GLOB_PATTERNS: &[&str] = &[
     // worlds, but their chunk schema cannot be flattened by the MCA handler.
     // Keep them raw so old worlds remain fully restorable.
     "**/*.mcr",
+    // Converting a world from MCRegion to Anvil leaves the original level data
+    // behind as `level.dat_mcr`. It is a frozen pre-Anvil artifact, so keep it
+    // raw rather than running it through the canonical gzip-NBT transform.
+    "**/*.dat_mcr",
     // Some launchers and archive tools retain Minecraft's old NBT snapshots
     // with an additional gzip suffix. Preserve them byte-for-byte rather than
     // treating them as unhandled files.
     "**/*.dat_old*.gz",
-    "session.lock",
+    // Worlds are sometimes distributed with another save nested inside them,
+    // so match every session.lock rather than only the one at the save root.
+    "**/session.lock",
 ];
 
 pub(crate) struct RawHandler {
