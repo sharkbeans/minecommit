@@ -1,0 +1,419 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react"
+
+export type Locale = "en" | "zh-CN"
+
+const LOCALE_STORAGE_KEY = "minecommit.locale"
+
+export const localeOptions: Array<{ value: Locale; label: string }> = [
+  { value: "en", label: "English" },
+  { value: "zh-CN", label: "中文（简体）" },
+]
+
+const en = {
+  "common.back": "Back",
+  "common.cancel": "Cancel",
+  "common.close": "Close",
+  "common.loading": "Loading…",
+  "common.save": "Save",
+  "common.saving": "Saving…",
+
+  "sidebar.chooseWorld": "Choose world",
+  "sidebar.manageWorlds": "Manage worlds",
+  "sidebar.recentWorlds": "Recent worlds",
+  "sidebar.noWorlds": "No worlds yet",
+  "sidebar.home": "Home",
+  "sidebar.settings": "Settings",
+
+  "settings.title": "Settings",
+  "settings.language": "Language",
+  "settings.languageDescription": "Choose the language used by MineCommit.",
+  "settings.commitAuthor": "Commit author",
+  "settings.commitAuthorDescription": "Name and email recorded with each Git backup.",
+  "settings.name": "Name",
+  "settings.namePlaceholder": "For example: Steve",
+  "settings.email": "Email",
+  "settings.emailPlaceholder": "For example: steve@example.com",
+  "settings.saved": "Saved",
+
+  "hover.worldName": "World name",
+  "hover.lastOpened": "Last opened",
+  "hover.worldPath": "World path",
+  "hover.repositoryPath": "Repository path",
+  "hover.cloudRepository": "Cloud repository",
+  "hover.notConfigured": "(Not configured)",
+  "hover.defaultBranch": "Default branch",
+
+  "logs.commit": "Backup",
+  "logs.restore": "Restore",
+  "logs.push": "Upload",
+  "logs.pull": "Download",
+  "logs.title": "{operation} log",
+  "logs.empty": "No logs yet",
+  "logs.forceStop": "Force stop",
+
+  "commit.title": "Create a Git backup",
+  "commit.description": "Add a note to help recognize this backup later.",
+  "commit.branch": "Branch",
+  "commit.message": "Backup note",
+  "commit.messagePlaceholder": "For example: Finished the mob farm",
+  "commit.playerName": "Your player name",
+  "commit.playerNamePlaceholder": "For example: Steve",
+  "commit.email": "Contact email",
+  "commit.emailPlaceholder": "For example: steve@example.com",
+  "commit.create": "Create backup",
+  "commit.creating": "Creating backup…",
+
+  "restore.title": "Restore the latest backup?",
+  "restore.description": "The latest backup will replace the current world. Your current world will first be saved as a timestamped .snapshot folder.",
+  "restore.action": "Restore backup",
+
+  "push.title": "Upload a branch to the cloud",
+  "push.remote": "Cloud repository address",
+  "push.branch": "Branch to upload",
+  "push.action": "Upload",
+  "push.uploading": "Uploading…",
+
+  "pull.title": "Download a branch from the cloud",
+  "pull.remote": "Cloud repository address",
+  "pull.branch": "Branch to download",
+  "pull.action": "Download",
+  "pull.downloading": "Downloading…",
+
+  "cloud.notConfigured": "Not configured",
+  "cloud.empty": "No backups yet",
+  "cloud.upToDate": "Up to date",
+  "cloud.localAhead": "Local backup waiting to upload",
+  "cloud.remoteAhead": "Cloud backup available to download",
+  "cloud.diverged": "Conflict detected",
+  "cloud.gitMissing": "Git is not installed. Install Git, then reopen MineCommit. You will not need to learn or run Git commands.",
+  "cloud.authenticationFailed": "Authentication failed. Use Git Credential Manager, an SSH key, or an existing Git sign-in.",
+  "cloud.networkUnavailable": "Network unavailable. Check your connection and cloud repository address.",
+  "cloud.unknownTime": "Unknown time",
+  "cloud.unknownDevice": "Unknown device",
+  "cloud.refreshStatus": "Refresh cloud status",
+  "cloud.checking": "Checking…",
+  "cloud.status": "Cloud status: {status}",
+  "cloud.cannotCheck": "Could not check",
+  "cloud.remote": "Remote",
+  "cloud.branch": "Branch",
+  "cloud.localBackup": "Local backup",
+  "cloud.cloudBackup": "Cloud backup",
+  "cloud.conflictHelp": "Both this computer and the cloud changed. MineCommit will not merge Minecraft worlds automatically; both histories are preserved.",
+  "cloud.enable": "Enable cloud backup",
+  "cloud.firstBackup": "Create first local backup",
+  "cloud.upload": "Upload new backup",
+  "cloud.sync": "Sync before playing",
+  "cloud.recheck": "Check cloud status again",
+
+  "wizard.title": "Enable cloud backup",
+  "wizard.welcome": "MineCommit can safely sync “{world}” to a private GitHub repository only you control. Minecraft stays completely vanilla—no mods, plugins, or Realms required.",
+  "wizard.haveAccount": "I already have a GitHub account",
+  "wizard.haveAccountDetail": "Guide me through creating a private backup repository",
+  "wizard.noAccount": "I do not have a GitHub account",
+  "wizard.noAccountDetail": "Start with a free account, then continue setup",
+  "wizard.needGit": "Do not have Git installed?",
+  "wizard.downloadGit": "Download Git",
+  "wizard.restartAfterGit": " then reopen MineCommit after installation.",
+  "wizard.later": "Not now",
+  "wizard.createAccountTitle": "Create a free GitHub account",
+  "wizard.createAccountDescription": "GitHub is the cloud service that stores your private backups. Create your account, then return here—MineCommit will not ask you to use Git commands.",
+  "wizard.createAccountStep1": "Open",
+  "wizard.createAccountStep1After": "and complete registration.",
+  "wizard.createAccountStep2": "Verify your email and sign in to GitHub.",
+  "wizard.createAccountStep3": "Return to MineCommit to create your private cloud backup.",
+  "wizard.loggedIn": "I am signed in to GitHub",
+  "wizard.existingAccountTitle": "Use an existing GitHub account",
+  "wizard.existingAccountDescription": "Sign in to GitHub, then create an empty private repository. The next screen explains every step.",
+  "wizard.loginPrompt": "Not signed in yet? Open",
+  "wizard.loginPromptAfter": ".",
+  "wizard.next": "Next",
+  "wizard.repositoryTitle": "Create your private cloud backup",
+  "wizard.repositoryDescription": "You only do this once. This repository stores MineCommit backups for “{world}”.",
+  "wizard.repositoryStep1": "Open",
+  "wizard.newRepository": "GitHub’s new-repository page",
+  "wizard.repositoryStep1After": "and name it, for example",
+  "wizard.repositoryStep2": "Set visibility to Private.",
+  "wizard.repositoryStep3": "Leave “Add a README file”, “Add .gitignore”, and “Choose a license” unchecked. The repository must be empty for a safe first sync.",
+  "wizard.repositoryStep4": "After creating it, choose Code → HTTPS and copy the address beginning with https://github.com/.",
+  "wizard.repositoryAddress": "Paste the GitHub repository address",
+  "wizard.repositoryAddressPlaceholder": "https://github.com/your-name/minecraft-survival-backup.git",
+  "wizard.backupBranch": "Backup branch",
+  "wizard.credentialHelp": "MineCommit never stores your GitHub password or token. Git Credential Manager or your SSH key securely handles sign-in during the first upload.",
+  "wizard.connect": "Connect private cloud backup",
+  "wizard.connecting": "Connecting…",
+
+  "dock.backup": "Backup",
+  "dock.restore": "Restore latest backup",
+  "dock.upload": "Upload",
+  "dock.download": "Download",
+
+  "worlds.emptyTitle": "Track a world",
+  "worlds.emptyLine1": "MineCommit is not tracking any Minecraft worlds yet.",
+  "worlds.emptyLine2": "Choose an existing world folder to start protecting it.",
+  "worlds.add": "Add world",
+  "worlds.selectTitle": "Select a world",
+  "worlds.selectDescription": "Choose a world folder that contains level.dat.",
+  "worlds.selectFolder": "Choose world folder",
+  "worlds.selecting": "Choose a folder…",
+  "worlds.singleFolderRequired": "Choose one world folder.",
+  "worlds.confirmTitle": "Confirm world details",
+  "worlds.confirmDescription": "These details were filled automatically. Check them, then continue.",
+  "worlds.name": "World name",
+  "worlds.namePlaceholder": "My world",
+  "worlds.path": "World path",
+  "worlds.pathPlaceholder": "/home/user/.minecraft/saves/My world",
+  "worlds.localBackupHelp": "MineCommit stores backups safely on this device. You can enable cloud backup from the world’s home page afterward.",
+  "worlds.track": "Track world",
+  "worlds.tracking": "Tracking…",
+  "worlds.branchTitle": "Choose the default branch",
+  "worlds.branchDescription": "This world already has a repository. Choose its default backup branch.",
+  "worlds.defaultBranch": "Default branch",
+  "worlds.selectBranch": "Choose a branch",
+  "worlds.confirmTrack": "Track this world",
+  "worlds.initTitle": "Set up the backup repository",
+  "worlds.initDescription": "The local backup repository does not exist yet, so MineCommit needs to create it.",
+  "worlds.branchName": "Default branch name",
+  "worlds.branchRequired": "A branch name is required.",
+  "worlds.initializing": "Setting up…",
+  "worlds.initialize": "Set up repository",
+  "worlds.listTitle": "Worlds",
+  "worlds.loading": "Loading…",
+  "worlds.lastOpened": "Last opened",
+  "worlds.actions": "Actions",
+  "worlds.deleteTitle": "Remove world",
+  "worlds.deleteDescription": "Remove “{world}” from MineCommit?",
+  "worlds.deleteRepository": "Also delete the local Git repository and backups",
+  "worlds.delete": "Remove",
+}
+
+export type TranslationKey = keyof typeof en
+
+const zhCN: Record<TranslationKey, string> = {
+  "common.back": "返回",
+  "common.cancel": "取消",
+  "common.close": "关闭",
+  "common.loading": "加载中…",
+  "common.save": "保存",
+  "common.saving": "保存中…",
+
+  "sidebar.chooseWorld": "选择存档",
+  "sidebar.manageWorlds": "管理存档",
+  "sidebar.recentWorlds": "近期存档",
+  "sidebar.noWorlds": "暂无存档",
+  "sidebar.home": "主页",
+  "sidebar.settings": "设置",
+
+  "settings.title": "设置",
+  "settings.language": "语言",
+  "settings.languageDescription": "选择 MineCommit 使用的语言。",
+  "settings.commitAuthor": "提交作者",
+  "settings.commitAuthorDescription": "设置 Git 提交时使用的作者名称和邮箱。",
+  "settings.name": "名称",
+  "settings.namePlaceholder": "例如：Steve",
+  "settings.email": "邮箱",
+  "settings.emailPlaceholder": "例如：steve@example.com",
+  "settings.saved": "已保存",
+
+  "hover.worldName": "存档名称",
+  "hover.lastOpened": "最近访问",
+  "hover.worldPath": "存档路径",
+  "hover.repositoryPath": "仓库路径",
+  "hover.cloudRepository": "远程仓库路径",
+  "hover.notConfigured": "（未设置）",
+  "hover.defaultBranch": "默认分支",
+
+  "logs.commit": "提交",
+  "logs.restore": "还原",
+  "logs.push": "推送",
+  "logs.pull": "拉取",
+  "logs.title": "{operation}日志",
+  "logs.empty": "暂无日志",
+  "logs.forceStop": "强制停止",
+
+  "commit.title": "提交到 Git 以备份",
+  "commit.description": "填写提交信息作为备注",
+  "commit.branch": "分支",
+  "commit.message": "提交信息",
+  "commit.messagePlaceholder": "例如：刷怪塔完工",
+  "commit.playerName": "你的游戏昵称",
+  "commit.playerNamePlaceholder": "例如：HairlessVillager",
+  "commit.email": "联系邮箱",
+  "commit.emailPlaceholder": "例如：hairlessvilager@foxmail.com",
+  "commit.create": "提交",
+  "commit.creating": "提交中…",
+
+  "restore.title": "确定要恢复最近提交吗？",
+  "restore.description": "这将会用 Git 仓库中最新的提交覆盖当前存档。如果存档已存在，将被重命名为 .<时间戳>.snapshot 备份。",
+  "restore.action": "恢复",
+
+  "push.title": "推送分支到远程仓库",
+  "push.remote": "远程仓库地址",
+  "push.branch": "推送分支",
+  "push.action": "推送",
+  "push.uploading": "推送中…",
+
+  "pull.title": "从远程仓库拉取分支",
+  "pull.remote": "远程仓库地址",
+  "pull.branch": "拉取分支",
+  "pull.action": "拉取",
+  "pull.downloading": "拉取中…",
+
+  "cloud.notConfigured": "未配置",
+  "cloud.empty": "尚无备份",
+  "cloud.upToDate": "已同步",
+  "cloud.localAhead": "本地备份等待上传",
+  "cloud.remoteAhead": "有可下载的云端备份",
+  "cloud.diverged": "检测到冲突",
+  "cloud.gitMissing": "未找到 Git。请安装 Git 后重新打开 MineCommit；不需要学习或运行任何 Git 命令。",
+  "cloud.authenticationFailed": "认证失败：请使用 Git Credential Manager、SSH 密钥或已配置的 Git 凭据。",
+  "cloud.networkUnavailable": "网络不可用：请检查网络连接和远程地址。",
+  "cloud.unknownTime": "时间未知",
+  "cloud.unknownDevice": "设备未知",
+  "cloud.refreshStatus": "刷新云端状态",
+  "cloud.checking": "检查中…",
+  "cloud.status": "云端状态：{status}",
+  "cloud.cannotCheck": "无法检查",
+  "cloud.remote": "远程",
+  "cloud.branch": "分支",
+  "cloud.localBackup": "本地备份",
+  "cloud.cloudBackup": "云端备份",
+  "cloud.conflictHelp": "本地和云端都已变化。MineCommit 不会自动合并 Minecraft 存档，两个历史都已保留。",
+  "cloud.enable": "启用云端备份",
+  "cloud.firstBackup": "创建第一份本地备份",
+  "cloud.upload": "上传新备份",
+  "cloud.sync": "同步后再游玩",
+  "cloud.recheck": "重新检查云端状态",
+
+  "wizard.title": "启用云端备份",
+  "wizard.welcome": "MineCommit 会把“{world}”的备份安全同步到一个仅你可见的 GitHub 仓库。Minecraft 不需要安装模组、插件或 Realms。",
+  "wizard.haveAccount": "我已有 GitHub 账号",
+  "wizard.haveAccountDetail": "引导我创建一个私有云端备份仓库",
+  "wizard.noAccount": "我还没有 GitHub 账号",
+  "wizard.noAccountDetail": "用免费账号开始，再继续设置",
+  "wizard.needGit": "还没有安装 Git？",
+  "wizard.downloadGit": "下载 Git",
+  "wizard.restartAfterGit": "，安装后重新打开 MineCommit。",
+  "wizard.later": "稍后再说",
+  "wizard.createAccountTitle": "创建免费的 GitHub 账号",
+  "wizard.createAccountDescription": "GitHub 是保存私有备份的云端服务。创建账号后，回到这里继续；MineCommit 不会要求你输入 Git 命令。",
+  "wizard.createAccountStep1": "打开",
+  "wizard.createAccountStep1After": "并完成注册。",
+  "wizard.createAccountStep2": "验证邮箱并登录 GitHub。",
+  "wizard.createAccountStep3": "回到 MineCommit，继续创建你的私有云端备份。",
+  "wizard.loggedIn": "我已登录 GitHub",
+  "wizard.existingAccountTitle": "使用已有 GitHub 账号",
+  "wizard.existingAccountDescription": "先登录 GitHub，然后创建一个空的私有仓库。下个页面会逐步说明该怎么做。",
+  "wizard.loginPrompt": "如果你还没有登录，可以先打开",
+  "wizard.loginPromptAfter": "。",
+  "wizard.next": "下一步",
+  "wizard.repositoryTitle": "创建私有云端备份",
+  "wizard.repositoryDescription": "这一步只需做一次。这个仓库专门保存“{world}”的 MineCommit 备份。",
+  "wizard.repositoryStep1": "打开",
+  "wizard.newRepository": "GitHub 的新建仓库页面",
+  "wizard.repositoryStep1After": "，为它取一个名字，例如",
+  "wizard.repositoryStep2": "将可见性设为 Private。",
+  "wizard.repositoryStep3": "保持“Add a README file”、“Add .gitignore”和“Choose a license”均未选中；仓库必须是空的，才能安全开始首次同步。",
+  "wizard.repositoryStep4": "创建后点击 Code → HTTPS，复制以 https://github.com/ 开头的地址。",
+  "wizard.repositoryAddress": "粘贴 GitHub 仓库地址",
+  "wizard.repositoryAddressPlaceholder": "https://github.com/你的用户名/minecraft-survival-backup.git",
+  "wizard.backupBranch": "备份分支",
+  "wizard.credentialHelp": "MineCommit 不会保存你的 GitHub 密码或令牌。首次上传时，Git Credential Manager 或你的 SSH 密钥会安全地处理登录。",
+  "wizard.connect": "连接私有云端备份",
+  "wizard.connecting": "连接中…",
+
+  "dock.backup": "提交 / 备份",
+  "dock.restore": "恢复最近提交",
+  "dock.upload": "上传 / 推送",
+  "dock.download": "下载 / 拉取",
+
+  "worlds.emptyTitle": "跟踪一个存档",
+  "worlds.emptyLine1": "MineCommit 还没有跟踪任何存档",
+  "worlds.emptyLine2": "点击按钮来跟踪一个已有的存档",
+  "worlds.add": "添加跟踪",
+  "worlds.selectTitle": "选择存档",
+  "worlds.selectDescription": "选择一个存档文件夹，需包含 level.dat 文件",
+  "worlds.selectFolder": "选择存档文件夹",
+  "worlds.selecting": "请选择…",
+  "worlds.singleFolderRequired": "请选择一个存档文件夹。",
+  "worlds.confirmTitle": "确认存档信息",
+  "worlds.confirmDescription": "已自动填写以下字段，请确认或修改后提交",
+  "worlds.name": "存档名称",
+  "worlds.namePlaceholder": "我的世界",
+  "worlds.path": "存档路径",
+  "worlds.pathPlaceholder": "/home/user/.minecraft/saves/我的世界",
+  "worlds.localBackupHelp": "MineCommit 会在此设备上安全保存备份。添加后，你可以在存档主页启用云端备份。",
+  "worlds.track": "跟踪",
+  "worlds.tracking": "添加中…",
+  "worlds.branchTitle": "选择默认分支",
+  "worlds.branchDescription": "该存档关联的仓库已存在，请选择一个分支作为默认分支",
+  "worlds.defaultBranch": "默认分支",
+  "worlds.selectBranch": "请选择一个分支",
+  "worlds.confirmTrack": "确认跟踪",
+  "worlds.initTitle": "初始化 Git 仓库",
+  "worlds.initDescription": "仓库目录不存在，需要初始化一个 Git 裸仓库",
+  "worlds.branchName": "默认分支名",
+  "worlds.branchRequired": "分支名不能为空",
+  "worlds.initializing": "初始化中…",
+  "worlds.initialize": "初始化仓库",
+  "worlds.listTitle": "存档列表",
+  "worlds.loading": "加载中…",
+  "worlds.lastOpened": "最近访问",
+  "worlds.actions": "操作",
+  "worlds.deleteTitle": "删除存档",
+  "worlds.deleteDescription": "确定要删除存档“{world}”吗？",
+  "worlds.deleteRepository": "同时删除本地 Git 仓库与备份数据",
+  "worlds.delete": "删除",
+}
+
+const translations: Record<Locale, Record<TranslationKey, string>> = {
+  en,
+  "zh-CN": zhCN,
+}
+
+interface I18nContextValue {
+  locale: Locale
+  setLocale: (locale: Locale) => void
+  t: (key: TranslationKey, values?: Record<string, string | number | undefined>) => string
+}
+
+const I18nContext = createContext<I18nContextValue | null>(null)
+
+function initialLocale(): Locale {
+  const savedLocale = window.localStorage.getItem(LOCALE_STORAGE_KEY)
+  return savedLocale === "zh-CN" ? "zh-CN" : "en"
+}
+
+export function I18nProvider({ children }: { children: ReactNode }) {
+  const [locale, setLocale] = useState<Locale>(initialLocale)
+
+  useEffect(() => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, locale)
+    document.documentElement.lang = locale
+  }, [locale])
+
+  const t = useCallback(
+    (key: TranslationKey, values: Record<string, string | number | undefined> = {}) =>
+      translations[locale][key].replace(/\{(\w+)\}/g, (match, name: string) =>
+        values[name] === undefined ? match : String(values[name])
+      ),
+    [locale]
+  )
+
+  const value = useMemo(() => ({ locale, setLocale, t }), [locale, t])
+
+  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>
+}
+
+export function useI18n() {
+  const context = useContext(I18nContext)
+  if (!context) throw new Error("useI18n must be used within an I18nProvider")
+  return context
+}

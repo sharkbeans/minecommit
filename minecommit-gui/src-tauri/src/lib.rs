@@ -832,6 +832,20 @@ fn derive_save_info(path: String) -> Result<DeriveSaveInfo, AppError> {
         PathBuf::from(canonical_str.strip_prefix(r"\\?\").unwrap_or(canonical_str))
     };
 
+    if !canonical.is_dir() {
+        return Err(AppError::InvalidUTF8(format!(
+            "world path is not a directory: {}",
+            path
+        )));
+    }
+
+    if !canonical.join("level.dat").is_file() {
+        return Err(AppError::InvalidUTF8(format!(
+            "world folder must contain level.dat: {}",
+            path
+        )));
+    }
+
     let parts: Vec<&str> = canonical
         .components()
         .filter_map(|c| match c {
@@ -842,6 +856,10 @@ fn derive_save_info(path: String) -> Result<DeriveSaveInfo, AppError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let save_name = parts.last().ok_or_else(|| {
+        AppError::InvalidUTF8(format!("path has no meaningful segments: {}", path))
+    })?;
+
     let name = match parts.as_slice() {
         [.., launcher, ".minecraft", "versions", version, "saves", save_name] => {
             format!("{} / {version} / {save_name}", launcher.to_uppercase())
@@ -850,12 +868,7 @@ fn derive_save_info(path: String) -> Result<DeriveSaveInfo, AppError> {
             format!("{} / {save_name}", launcher.to_uppercase())
         }
         [.., "saves", save_name] => save_name.to_string(),
-        _ => {
-            return Err(AppError::InvalidUTF8(format!(
-                "path has no meaningful segments: {}",
-                path
-            )))
-        }
+        _ => save_name.to_string(),
     };
     let repo_path = match parts.as_slice() {
         [.., _, ".minecraft", "versions", _, "saves", save_name]
@@ -865,16 +878,10 @@ fn derive_save_info(path: String) -> Result<DeriveSaveInfo, AppError> {
             p.push(format!("{save_name}.git"));
             p.to_str().unwrap().to_string()
         }
-        [.., save_name] => {
+        _ => {
             let mut p = canonical.parent().unwrap().to_path_buf();
             p.push(format!("{save_name}.git"));
             p.to_str().unwrap().to_string()
-        }
-        _ => {
-            return Err(AppError::InvalidUTF8(format!(
-                "path has no meaningful segments: {}",
-                path
-            )))
         }
     };
 

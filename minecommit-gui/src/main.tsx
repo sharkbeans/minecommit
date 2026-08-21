@@ -10,21 +10,24 @@ import { SidebarProvider } from "@/components/ui/sidebar.tsx"
 import { AppSidebar } from "@/components/app-sidebar.tsx"
 import { SavesProvider } from "@/contexts/saves-context.tsx"
 import { CommitAuthorProvider } from "@/contexts/commit-author-context.tsx"
+import { I18nProvider } from "@/contexts/i18n.tsx"
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ThemeProvider>
       <TooltipProvider>
-        <BrowserRouter>
-          <SidebarProvider defaultOpen={false}>
-            <SavesProvider>
-              <CommitAuthorProvider>
-                <AppSidebar />
-                <App />
-              </CommitAuthorProvider>
-            </SavesProvider>
-          </SidebarProvider>
-        </BrowserRouter>
+        <I18nProvider>
+          <BrowserRouter>
+            <SidebarProvider defaultOpen={false}>
+              <SavesProvider>
+                <CommitAuthorProvider>
+                  <AppSidebar />
+                  <App />
+                </CommitAuthorProvider>
+              </SavesProvider>
+            </SidebarProvider>
+          </BrowserRouter>
+        </I18nProvider>
       </TooltipProvider>
     </ThemeProvider>
   </StrictMode>

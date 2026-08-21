@@ -30,18 +30,13 @@ import {
   Settings,
 } from "lucide-react"
 import { useSaves } from "@/contexts/saves"
-
-const allItems = [
-  { to: "/", label: "主页", icon: House },
-  // { to: "/dashboard", label: "看板", icon: LayoutDashboard },
-  // { to: "/history", label: "历史", icon: History },
-  { to: "/settings", label: "设置", icon: Settings },
-]
-const navItems = allItems.slice(0, -1)
+import { useI18n } from "@/contexts/i18n"
 
 export function AppSidebar() {
   const navigate = useNavigate()
   const { saves, selectedSave, setSelectedSave } = useSaves()
+  const { t } = useI18n()
+  const navItems = [{ to: "/", label: t("sidebar.home"), icon: House }]
 
   return (
     <Sidebar collapsible="icon">
@@ -53,7 +48,7 @@ export function AppSidebar() {
                 render={
                   <SidebarMenuButton>
                     <HardDrive />
-                    {selectedSave ? selectedSave.name : "选择存档"}
+                    {selectedSave ? selectedSave.name : t("sidebar.chooseWorld")}
                     <ChevronDown className="ml-auto" />
                   </SidebarMenuButton>
                 }
@@ -62,14 +57,14 @@ export function AppSidebar() {
                 <DropdownMenuGroup>
                   <DropdownMenuItem onClick={() => navigate("/save-manage")}>
                     <Archive />
-                    管理存档
+                    {t("sidebar.manageWorlds")}
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>
-                  <DropdownMenuLabel>近期存档</DropdownMenuLabel>
+                  <DropdownMenuLabel>{t("sidebar.recentWorlds")}</DropdownMenuLabel>
                   {saves.length === 0 ? (
-                    <DropdownMenuItem disabled>暂无存档</DropdownMenuItem>
+                    <DropdownMenuItem disabled>{t("sidebar.noWorlds")}</DropdownMenuItem>
                   ) : (
                     <DropdownMenuRadioGroup
                       value={selectedSave?.name ?? ""}
@@ -112,7 +107,7 @@ export function AppSidebar() {
           <SidebarMenuItem>
             <SidebarMenuButton render={<NavLink to="/settings" />}>
               <Settings />
-              设置
+              {t("sidebar.settings")}
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>

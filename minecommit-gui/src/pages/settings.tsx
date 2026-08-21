@@ -10,9 +10,18 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { localeOptions, useI18n, type Locale } from "@/contexts/i18n"
 
 export function SettingsPage() {
   const { author, loaded, setAuthor } = useCommitAuthor()
+  const { locale, setLocale, t } = useI18n()
   const [name, setName] = useState(author.name)
   const [email, setEmail] = useState(author.email)
   const [saving, setSaving] = useState(false)
@@ -34,48 +43,74 @@ export function SettingsPage() {
   if (!loaded) {
     return (
       <div className="flex min-h-svh items-center justify-center p-6">
-        <p className="text-muted-foreground">加载中...</p>
+        <p className="text-muted-foreground">{t("common.loading")}</p>
       </div>
     )
   }
 
   return (
     <div className="mx-auto flex w-full max-w-lg flex-col gap-6 p-6" key={`${author.name}-${author.email}`}>
-      <h1 className="text-2xl font-bold">设置</h1>
+      <h1 className="text-2xl font-bold">{t("settings.title")}</h1>
 
       <Card>
         <CardHeader>
-          <CardTitle>提交作者</CardTitle>
+          <CardTitle>{t("settings.language")}</CardTitle>
+          <CardDescription>{t("settings.languageDescription")}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Select
+            value={locale}
+            onValueChange={(value) => {
+              if (value === "en" || value === "zh-CN") setLocale(value as Locale)
+            }}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {localeOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{t("settings.commitAuthor")}</CardTitle>
           <CardDescription>
-            设置 Git 提交时使用的作者名称和邮箱
+            {t("settings.commitAuthorDescription")}
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <div className="flex flex-col gap-2">
-            <Label htmlFor="author-name">名称</Label>
+            <Label htmlFor="author-name">{t("settings.name")}</Label>
             <Input
               id="author-name"
-              placeholder="例如: Steve"
+              placeholder={t("settings.namePlaceholder")}
               defaultValue={author.name}
               onChange={(e) => setName(e.target.value)}
             />
           </div>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="author-email">邮箱</Label>
+            <Label htmlFor="author-email">{t("settings.email")}</Label>
             <Input
               id="author-email"
-              placeholder="例如: steve@example.com"
+              placeholder={t("settings.emailPlaceholder")}
               defaultValue={author.email}
               onChange={(e) => setEmail(e.target.value)}
             />
           </div>
           <div className="flex items-center gap-3">
             <Button onClick={handleSave} disabled={saving}>
-              {saving ? "保存中..." : "保存"}
+              {saving ? t("common.saving") : t("common.save")}
             </Button>
             {saved && (
               <span className="text-sm text-green-600 dark:text-green-400">
-                已保存
+                {t("settings.saved")}
               </span>
             )}
           </div>

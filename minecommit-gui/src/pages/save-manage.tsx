@@ -42,22 +42,25 @@ import { open as openFolderDialog } from "@tauri-apps/plugin-dialog"
 import { useSaves } from "@/contexts/saves"
 import { Label } from "@/components/ui/label"
 import { SaveHoverCard } from "@/components/save-hover-card"
+import { useI18n } from "@/contexts/i18n"
 
 function EmptySave({ onAddTrack }: { onAddTrack: () => void }) {
+  const { t } = useI18n()
+
   return (
     <Empty>
       <EmptyHeader>
         <EmptyMedia variant="icon">
           <HardDrive />
         </EmptyMedia>
-        <EmptyTitle>跟踪一个存档</EmptyTitle>
+        <EmptyTitle>{t("worlds.emptyTitle")}</EmptyTitle>
         <EmptyDescription>
-          <p>MineCommit 还没有跟踪任何存档</p>
-          <p>点击按钮来跟踪一个已有的存档</p>
+          <p>{t("worlds.emptyLine1")}</p>
+          <p>{t("worlds.emptyLine2")}</p>
         </EmptyDescription>
       </EmptyHeader>
       <EmptyContent>
-        <Button onClick={onAddTrack}>添加跟踪</Button>
+        <Button onClick={onAddTrack}>{t("worlds.add")}</Button>
       </EmptyContent>
     </Empty>
   )
@@ -74,6 +77,7 @@ function AddTrackDialog({
   onOpenChange: (open: boolean) => void
   onSaveAdded: () => void
 }) {
+  const { t } = useI18n()
   const [step, setStep] = useState<AddTrackStep>("select")
 
   // Form state (pre-filled after folder selection)
@@ -115,20 +119,25 @@ function AddTrackDialog({
       const selected = await openFolderDialog({
         directory: true,
         multiple: false,
-        title: "选择存档文件夹",
+        title: t("worlds.selectFolder"),
       })
-      if (selected) {
-        // Derive fields via backend
-        const info = await invoke<{ name: string; repo_path: string }>(
-          "derive_save_info",
-          { path: selected }
-        )
-        setName(info.name)
-        setPath(selected)
-        setLocalRepoPath(info.repo_path)
-        setError("")
-        setStep("confirm")
+      if (!selected) return
+
+      if (typeof selected !== "string") {
+        setError(t("worlds.singleFolderRequired"))
+        return
       }
+
+      // Derive fields via backend.
+      const info = await invoke<{ name: string; repo_path: string }>(
+        "derive_save_info",
+        { path: selected }
+      )
+      setName(info.name)
+      setPath(selected)
+      setLocalRepoPath(info.repo_path)
+      setError("")
+      setStep("confirm")
     } catch (err) {
       setError(String(err))
     } finally {
@@ -241,9 +250,9 @@ function AddTrackDialog({
         {step === "select" && (
           <>
             <DialogHeader>
-              <DialogTitle>选择存档</DialogTitle>
+              <DialogTitle>{t("worlds.selectTitle")}</DialogTitle>
               <DialogDescription>
-                选择一个存档文件夹，需包含 level.dat 文件
+                {t("worlds.selectDescription")}
               </DialogDescription>
             </DialogHeader>
             <div className="flex flex-col items-center gap-4 py-4">
@@ -254,12 +263,17 @@ function AddTrackDialog({
                 className="w-full max-w-xs"
               >
                 <FolderOpen data-icon="inline-start" />
-                {selecting ? "请选择…" : "选择存档文件夹"}
+                {selecting ? t("worlds.selecting") : t("worlds.selectFolder")}
               </Button>
+              {error && (
+                <p className="w-full max-w-xs text-sm text-destructive" role="alert">
+                  {error}
+                </p>
+              )}
             </div>
             <DialogFooter>
               <DialogClose render={<Button variant="outline" />}>
-                取消
+                {t("common.cancel")}
               </DialogClose>
             </DialogFooter>
           </>
@@ -271,47 +285,47 @@ function AddTrackDialog({
             className="flex flex-col gap-4"
           >
             <DialogHeader>
-              <DialogTitle>确认存档信息</DialogTitle>
+              <DialogTitle>{t("worlds.confirmTitle")}</DialogTitle>
               <DialogDescription>
-                已自动填写以下字段，请确认或修改后提交
+                {t("worlds.confirmDescription")}
               </DialogDescription>
             </DialogHeader>
             <FieldGroup>
               <Field>
-                <FieldLabel htmlFor="save-name">存档名称</FieldLabel>
+                <FieldLabel htmlFor="save-name">{t("worlds.name")}</FieldLabel>
                 <Input
                   id="save-name"
-                  placeholder="我的世界"
+                  placeholder={t("worlds.namePlaceholder")}
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   required
                 />
               </Field>
               <Field>
-                <FieldLabel htmlFor="save-path">存档路径</FieldLabel>
+                <FieldLabel htmlFor="save-path">{t("worlds.path")}</FieldLabel>
                 <Input
                   id="save-path"
-                  placeholder="/home/user/.minecraft/saves/我的世界"
+                  placeholder={t("worlds.pathPlaceholder")}
                   value={path}
                   onChange={(e) => setPath(e.target.value)}
                   required
                 />
               </Field>
               <p className="text-sm text-muted-foreground">
-                MineCommit 会在此设备上安全保存备份。添加后，你可以在存档主页启用云端备份。
+                {t("worlds.localBackupHelp")}
               </p>
               {error && <p className="text-sm text-destructive">{error}</p>}
             </FieldGroup>
             <DialogFooter className="mt-6">
               <Button variant="outline" type="button" onClick={handleBack}>
-                返回
+                {t("common.back")}
               </Button>
               <Button
                 type="button"
                 disabled={submitting}
                 onClick={handleSubmit}
               >
-                {submitting ? "添加中…" : "跟踪"}
+                {submitting ? t("worlds.tracking") : t("worlds.track")}
               </Button>
             </DialogFooter>
           </form>
@@ -320,20 +334,20 @@ function AddTrackDialog({
         {step === "select-branch" && (
           <>
             <DialogHeader>
-              <DialogTitle>选择默认分支</DialogTitle>
+              <DialogTitle>{t("worlds.branchTitle")}</DialogTitle>
               <DialogDescription>
-                该存档关联的仓库已存在，请选择一个分支作为默认分支
+                {t("worlds.branchDescription")}
               </DialogDescription>
             </DialogHeader>
             <FieldGroup>
               <Field>
-                <FieldLabel htmlFor="select-branch">默认分支</FieldLabel>
+                <FieldLabel htmlFor="select-branch">{t("worlds.defaultBranch")}</FieldLabel>
                 <Select
                   value={defaultBranch}
                   onValueChange={(v) => setDefaultBranch(v ?? "")}
                 >
                   <SelectTrigger className="w-full">
-                    <SelectValue placeholder="请选择一个分支" />
+                    <SelectValue placeholder={t("worlds.selectBranch")} />
                   </SelectTrigger>
                   <SelectContent>
                     {branches.map((branch) => (
@@ -348,13 +362,13 @@ function AddTrackDialog({
             {error && <p className="text-sm text-destructive">{error}</p>}
             <DialogFooter>
               <Button variant="outline" onClick={() => setStep("confirm")}>
-                返回
+                {t("common.back")}
               </Button>
               <Button
                 disabled={submitting || !defaultBranch}
                 onClick={handleBranchConfirm}
               >
-                {submitting ? "添加中…" : "确认跟踪"}
+                {submitting ? t("worlds.tracking") : t("worlds.confirmTrack")}
               </Button>
             </DialogFooter>
           </>
@@ -363,14 +377,14 @@ function AddTrackDialog({
         {step === "init" && (
           <>
             <DialogHeader>
-              <DialogTitle>初始化 Git 仓库</DialogTitle>
+              <DialogTitle>{t("worlds.initTitle")}</DialogTitle>
               <DialogDescription>
-                仓库目录不存在，需要初始化一个 Git 裸仓库
+                {t("worlds.initDescription")}
               </DialogDescription>
             </DialogHeader>
             <FieldGroup>
               <Field>
-                <FieldLabel htmlFor="init-branch">默认分支名</FieldLabel>
+                <FieldLabel htmlFor="init-branch">{t("worlds.branchName")}</FieldLabel>
                 <Input
                   id="init-branch"
                   placeholder="main"
@@ -382,19 +396,19 @@ function AddTrackDialog({
             {error && <p className="text-sm text-destructive">{error}</p>}
             <DialogFooter>
               <Button variant="outline" onClick={handleInitCancel}>
-                返回
+                {t("common.back")}
               </Button>
               <Button
                 disabled={initializing}
                 onClick={() => {
                   if (!initBranch.trim()) {
-                    setError("分支名不能为空")
+                    setError(t("worlds.branchRequired"))
                     return
                   }
                   handleInitComplete(initBranch.trim())
                 }}
               >
-                {initializing ? "初始化中…" : "初始化仓库"}
+                {initializing ? t("worlds.initializing") : t("worlds.initialize")}
               </Button>
             </DialogFooter>
           </>
@@ -406,6 +420,7 @@ function AddTrackDialog({
 
 export function SaveManagePage() {
   const { saves, loaded, refreshSaves } = useSaves()
+  const { t } = useI18n()
   const [dialogOpen, setDialogOpen] = useState(false)
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
@@ -434,17 +449,17 @@ export function SaveManagePage() {
         <CardHeader>
           <div className="flex items-end justify-between">
             <div>
-              <CardTitle>存档列表</CardTitle>
+              <CardTitle>{t("worlds.listTitle")}</CardTitle>
             </div>
             {saves.length > 0 && (
-              <Button onClick={() => setDialogOpen(true)}>添加跟踪</Button>
+              <Button onClick={() => setDialogOpen(true)}>{t("worlds.add")}</Button>
             )}
           </div>
         </CardHeader>
         <CardContent>
           {error && <p className="mb-4 text-sm text-destructive">{error}</p>}
           {!loaded ? (
-            <p className="text-sm text-muted-foreground">加载中…</p>
+            <p className="text-sm text-muted-foreground">{t("worlds.loading")}</p>
           ) : saves.length === 0 ? (
             <EmptySave onAddTrack={() => setDialogOpen(true)} />
           ) : (
@@ -452,13 +467,13 @@ export function SaveManagePage() {
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-auto text-muted-foreground">
-                    存档名称
+                    {t("worlds.name")}
                   </TableHead>
                   <TableHead className="w-52 text-muted-foreground">
-                    最近访问
+                    {t("worlds.lastOpened")}
                   </TableHead>
                   <TableHead className="w-18">
-                    <span className="sr-only">操作</span>
+                    <span className="sr-only">{t("worlds.actions")}</span>
                   </TableHead>
                 </TableRow>
               </TableHeader>
@@ -503,9 +518,9 @@ export function SaveManagePage() {
       <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>删除存档</DialogTitle>
+            <DialogTitle>{t("worlds.deleteTitle")}</DialogTitle>
             <DialogDescription>
-              确定要删除存档「{deleteTarget}」吗？
+              {t("worlds.deleteDescription", { world: deleteTarget ?? "" })}
             </DialogDescription>
           </DialogHeader>
           <FieldGroup>
@@ -519,7 +534,7 @@ export function SaveManagePage() {
                 }
               />
               <Label htmlFor="delete-repo-checkbox">
-                同时删除本地 Git 仓库与备份数据
+                {t("worlds.deleteRepository")}
               </Label>
             </Field>
           </FieldGroup>
@@ -532,10 +547,10 @@ export function SaveManagePage() {
                 setDeleteRepoChecked(false)
               }}
             >
-              取消
+              {t("common.cancel")}
             </Button>
             <Button variant="destructive" onClick={handleConfirmDelete}>
-              删除
+              {t("worlds.delete")}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -11,20 +11,21 @@ import {
 import { Check, ChevronsDown, Copy, Download } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Button } from "./ui/button"
+import { useI18n, type TranslationKey } from "@/contexts/i18n"
 
 export type Operation = "commit" | "restore" | "push" | "pull"
 
-const OPERATION_LABELS: Record<Operation, string> = {
-  commit: "提交",
-  restore: "还原",
-  push: "推送",
-  pull: "拉取",
+const operationTranslationKeys: Record<Operation, TranslationKey> = {
+  commit: "logs.commit",
+  restore: "logs.restore",
+  push: "logs.push",
+  pull: "logs.pull",
 }
 
-function formatTimestamp(iso?: string): string {
+function formatTimestamp(iso?: string, locale = "en"): string {
   const d = iso ? new Date(iso) : new Date()
   const ms = d.getMilliseconds().toString().padStart(3, "0")
-  return `${d.toLocaleTimeString("en-US", {
+  return `${d.toLocaleTimeString(locale, {
     hour12: false,
     hour: "2-digit",
     minute: "2-digit",
@@ -83,6 +84,7 @@ function RollingLogContent({
   externalFinished?: boolean
   onForceStop?: () => void
 }) {
+  const { locale, t } = useI18n()
   const finished = externalFinished ?? false
   const entries = useStableEntries(externalLines)
   const scrollRef = React.useRef<HTMLDivElement>(null)
@@ -130,7 +132,7 @@ function RollingLogContent({
     const text = entries
       .map(
         (e) =>
-          `[${formatTimestamp(e.timestamp)}] [${LEVEL_LABELS[e.level]}] ${e.message}`
+          `[${formatTimestamp(e.timestamp, locale)}] [${LEVEL_LABELS[e.level]}] ${e.message}`
       )
       .join("\n")
     try {
@@ -140,13 +142,13 @@ function RollingLogContent({
     } catch {
       // ignore
     }
-  }, [entries])
+  }, [entries, locale])
 
   const handleDownload = React.useCallback(() => {
     const text = entries
       .map(
         (e) =>
-          `[${formatTimestamp(e.timestamp)}] [${LEVEL_LABELS[e.level]}] ${e.message}`
+          `[${formatTimestamp(e.timestamp, locale)}] [${LEVEL_LABELS[e.level]}] ${e.message}`
       )
       .join("\n")
     const blob = new Blob([text], { type: "text/plain" })
@@ -156,14 +158,14 @@ function RollingLogContent({
     a.download = `${operation}-${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.txt`
     a.click()
     URL.revokeObjectURL(url)
-  }, [entries, operation])
+  }, [entries, locale, operation])
 
   return (
     <>
       {/* Simplified toolbar */}
       <div className="flex items-center">
         <span className="flex-1 text-base">
-          {OPERATION_LABELS[operation]}日志
+          {t("logs.title", { operation: t(operationTranslationKeys[operation]) })}
         </span>
         <Button variant="ghost" onClick={handleCopy}>
           {copied ? <Check /> : <Copy />}
@@ -186,7 +188,7 @@ function RollingLogContent({
       >
         {entries.length === 0 ? (
           <div className="flex items-center justify-center py-10 text-sm text-muted-foreground">
-            暂无日志
+            {t("logs.empty")}
           </div>
         ) : (
           entries.map((entry, i) => {
@@ -194,7 +196,7 @@ function RollingLogContent({
             return (
               <div key={`rl-${i}`} className="flex">
                 <span className="shrink-0 text-muted-foreground/60">
-                  {formatTimestamp(entry.timestamp)}
+                  {formatTimestamp(entry.timestamp, locale)}
                 </span>
                 &nbsp;
                 <span
@@ -213,10 +215,10 @@ function RollingLogContent({
       </div>
 
       <AlertDialogFooter>
-        <AlertDialogCancel disabled={!finished}>关闭</AlertDialogCancel>
+        <AlertDialogCancel disabled={!finished}>{t("common.close")}</AlertDialogCancel>
         {!finished && (
           <AlertDialogAction variant="destructive" onClick={onForceStop}>
-            强制停止
+            {t("logs.forceStop")}
           </AlertDialogAction>
         )}
       </AlertDialogFooter>
