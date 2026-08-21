@@ -13,7 +13,6 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
 use std::process::Command;
 
 #[cfg(not(unix))]
@@ -154,6 +153,9 @@ impl RemoteSync {
         ensure_no_embedded_https_credentials(url)?;
 
         let existing = run_git(&self.git_dir, ["config", "--get", "remote.origin.url"])?;
+        let previous_url = existing
+            .success
+            .then(|| existing.stdout.trim().to_string());
         if existing.success {
             ensure_git_success(
                 run_git(&self.git_dir, ["remote", "set-url", DEFAULT_REMOTE, url])?,
@@ -164,6 +166,15 @@ impl RemoteSync {
                 run_git(&self.git_dir, ["remote", "add", DEFAULT_REMOTE, url])?,
                 "failed to add cloud remote",
             )?;
+        }
+
+        // Tracking refs describe one specific repository. Pointing the save at
+        // a different one leaves them describing a repository that is no longer
+        // connected — possibly one that has since been deleted — and `status`
+        // would keep reporting that stale relationship, because it answers from
+        // cached refs without contacting the network.
+        if previous_url.as_deref() != Some(url) {
+            self.clear_tracking_refs()?;
         }
 
         // `git remote add` normally installs a force-prefixed fetch refspec.
@@ -201,9 +212,99 @@ impl RemoteSync {
         }
         if output.stderr.contains("couldn't find remote ref") {
             log::info!("Cloud branch '{}' has no commits yet", self.branch);
+            // The branch is confirmed absent from the remote, so any tracking
+            // ref for it is left over from an earlier remote and must not keep
+            // standing in for cloud state.
+            self.clear_tracking_ref(&self.branch)?;
             return Ok(());
         }
         ensure_git_success(output, "failed to fetch cloud backups")
+    }
+
+    /// Drop every cached `refs/remotes/origin/*` ref.
+    fn clear_tracking_refs(&self) -> Result<()> {
+        let prefix = format!("refs/remotes/{DEFAULT_REMOTE}/");
+        let listed = run_git(
+            &self.git_dir,
+            ["for-each-ref", "--format=%(refname)", &prefix],
+        )?;
+        if !listed.success {
+            return Ok(());
+        }
+        for reference in listed.stdout.lines().map(str::trim).filter(|r| !r.is_empty()) {
+            log::info!("Dropping stale cloud tracking ref {reference}");
+            ensure_git_success(
+                run_git(&self.git_dir, ["update-ref", "-d", reference])?,
+                "failed to drop stale cloud tracking ref",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Drop the cached tracking ref for a single branch, if it exists.
+    fn clear_tracking_ref(&self, branch: &str) -> Result<()> {
+        let reference = format!("refs/remotes/{DEFAULT_REMOTE}/{branch}");
+        let existing = run_git(
+            &self.git_dir,
+            ["rev-parse", "--verify", "--quiet", &reference],
+        )?;
+        if !existing.success {
+            return Ok(());
+        }
+        log::info!("Cloud branch '{branch}' does not exist; dropping stale tracking ref");
+        ensure_git_success(
+            run_git(&self.git_dir, ["update-ref", "-d", &reference])?,
+            "failed to drop stale cloud tracking ref",
+        )
+    }
+
+    /// List the branches that actually exist on a remote, without needing a
+    /// configured remote or any local clone of it.
+    ///
+    /// Cloud setup uses this so a branch is chosen from what the repository
+    /// really has, rather than typed from memory and silently resolving to an
+    /// empty state when it does not match.
+    pub fn list_remote_branches(url: &str) -> Result<Vec<String>> {
+        anyhow::ensure!(!url.trim().is_empty(), "remote URL cannot be empty");
+        ensure_no_embedded_https_credentials(url)?;
+        let output = Command::new("git")
+            .args(["ls-remote", "--heads", url])
+            .output()
+            .context("failed to start Git; install Git and ensure it is on PATH")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "could not reach the cloud repository: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(String::from_utf8(output.stdout)
+            .context("Git emitted non-UTF-8 output")?
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter_map(|(_, reference)| reference.trim().strip_prefix("refs/heads/"))
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Branches in the local backup repository that already have commits.
+    ///
+    /// Used to detect the case where a world's history lives on one branch
+    /// while the cloud is configured to use another, which otherwise looks
+    /// indistinguishable from having no backups at all.
+    pub fn local_branches(&self) -> Result<Vec<String>> {
+        let listed = run_git(
+            &self.git_dir,
+            ["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        )?;
+        if !listed.success {
+            return Ok(vec![]);
+        }
+        Ok(listed
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect())
     }
 
     /// Return the status using the most recently fetched remote-tracking ref.
@@ -819,6 +920,75 @@ mod tests {
 
         sync.configure_remote("/path/that/does/not/exist.git").unwrap();
         assert!(sync.fetch().is_err());
+    }
+
+    /// Repointing a save at a different cloud repository must not leave the
+    /// previous repository's tracking refs behind. `status` answers from cached
+    /// refs, so a stale one lets a deleted repository keep reporting state.
+    #[test]
+    fn repointing_the_remote_forgets_the_previous_repository() {
+        let old_cloud = init_bare();
+        let new_cloud = init_bare();
+        let device = init_bare();
+
+        let backup = commit(device.path(), None, "backup");
+        set_branch(device.path(), &backup);
+        let sync = configured(device.path(), old_cloud.path());
+        sync.push().expect("upload to the first cloud repo");
+        assert_eq!(sync.status().unwrap().state, SyncState::UpToDate);
+
+        // Point the same world at a brand new, empty repository.
+        sync.configure_remote(new_cloud.path().to_str().unwrap())
+            .expect("repoint remote");
+
+        let status = sync.status().expect("status after repointing");
+        assert_eq!(
+            status.remote_commit, None,
+            "the old repository's commit must not survive as cloud state"
+        );
+        assert_eq!(
+            status.state,
+            SyncState::LocalAhead,
+            "a local backup against an empty cloud repo is waiting to upload"
+        );
+    }
+
+    /// A branch that does not exist on the remote must clear its tracking ref
+    /// rather than letting an earlier value stand in for cloud state.
+    #[test]
+    fn fetching_a_missing_branch_clears_its_tracking_ref() {
+        let cloud = init_bare();
+        let device = init_bare();
+
+        let backup = commit(device.path(), None, "backup");
+        set_branch(device.path(), &backup);
+        let sync = configured(device.path(), cloud.path());
+        sync.push().expect("upload");
+        assert!(sync.status().unwrap().remote_commit.is_some());
+
+        // Delete the branch on the cloud side, as deleting and recreating a
+        // repository would.
+        git(cloud.path(), &["update-ref", "-d", "refs/heads/main"]);
+
+        sync.fetch().expect("fetch a now-missing branch");
+        let status = sync.status().expect("status");
+        assert_eq!(status.remote_commit, None);
+        assert_eq!(status.state, SyncState::LocalAhead);
+    }
+
+    #[test]
+    fn lists_branches_that_exist_on_the_remote() {
+        let cloud = init_bare();
+        let device = init_bare();
+        let backup = commit(device.path(), None, "backup");
+        set_branch(device.path(), &backup);
+        let sync = configured(device.path(), cloud.path());
+        sync.push().expect("upload");
+
+        let branches = RemoteSync::list_remote_branches(cloud.path().to_str().unwrap())
+            .expect("list remote branches");
+        assert_eq!(branches, vec!["main".to_string()]);
+        assert_eq!(sync.local_branches().unwrap(), vec!["main".to_string()]);
     }
 
     #[test]
