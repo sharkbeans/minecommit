@@ -238,7 +238,7 @@ impl RemoteSync {
             (None, Some(_)) => SyncState::RemoteAhead,
             (Some(local), Some(remote)) if local == remote => SyncState::UpToDate,
             (Some(local), Some(remote)) if self.is_ancestor(local, remote)? => SyncState::RemoteAhead,
-            (Some(remote), Some(local)) if self.is_ancestor(remote, local)? => SyncState::LocalAhead,
+            (Some(local), Some(remote)) if self.is_ancestor(remote, local)? => SyncState::LocalAhead,
             (Some(_), Some(_)) => SyncState::Diverged,
         };
 
