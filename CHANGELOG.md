@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.9 (2026-08-21)
+
+Bug fixes
+
+- Back up worlds on Windows again. MineCommit holds the world's session.lock
+  for the duration of a backup to prove Minecraft is not running, then tried to
+  read that same file as part of the backup. Windows byte-range locks are
+  mandatory, so its own read failed with "another process has locked a portion
+  of the file (os error 33)". Unix locks are advisory, so this never appeared
+  on Linux.
+- Stop storing session.lock altogether. It is ephemeral state that Minecraft
+  rewrites whenever a world is opened and recreates when absent, so keeping it
+  only added a spurious change to every backup.
+
 ## 0.4.8 (2026-08-21)
 
 Bug fixes
