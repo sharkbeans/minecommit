@@ -8,8 +8,15 @@ on:
 
 jobs:
   test:
-    name: Test core and CLI
-    runs-on: ubuntu-latest
+    name: Test core and CLI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is not redundant here: several restore and locking paths are
+        # platform-specific, and a directory rename behaves differently when a
+        # handle inside it is still open.
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
