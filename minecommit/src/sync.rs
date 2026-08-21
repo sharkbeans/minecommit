@@ -7,12 +7,14 @@
 use std::{
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
-    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+use std::process::Command;
 
 #[cfg(not(unix))]
 use std::fs::TryLockError;
@@ -108,7 +110,7 @@ pub struct RemoteSync {
     branch: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct GitOutput {
     success: bool,
     stdout: String,
@@ -397,7 +399,7 @@ impl RemoteSync {
             return Ok((None, None));
         };
         let output = run_git(&self.git_dir, ["show", "-s", "--format=%cI%n%B", commit])?;
-        ensure_git_success(output, "failed to read cloud backup metadata")?;
+        ensure_git_success(output.clone(), "failed to read cloud backup metadata")?;
 
         let mut lines = output.stdout.lines();
         let timestamp = lines
