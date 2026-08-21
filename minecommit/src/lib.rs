@@ -83,6 +83,17 @@ impl Config {
             .filter(|item| !processed.contains(item))
             .collect::<Vec<_>>();
 
+        // Do not make a partial backup look successful. Flattening may have
+        // written loose Git objects, but without a commit or ref update they
+        // are unreachable and no backup history advances.
+        if !unprocessed.is_empty() {
+            log::warn!(
+                "Found {} unhandled files; leaving the backup branch unchanged",
+                unprocessed.len()
+            );
+            return Ok(unprocessed);
+        }
+
         let commit = git.commit(parents.as_slice(), message, author_name, author_email)?;
 
         if let Some(r#ref) = r#ref {

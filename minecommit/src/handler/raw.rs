@@ -9,6 +9,10 @@ const RAW_GLOB_PATTERNS: &[&str] = &[
     "**/*.txt",
     "**/*.snbt",
     "**/*.toml",
+    // Some launchers and archive tools retain Minecraft's old NBT snapshots
+    // with an additional gzip suffix. Preserve them byte-for-byte rather than
+    // treating them as unhandled files.
+    "**/*.dat_old*.gz",
     "session.lock",
 ];
 
