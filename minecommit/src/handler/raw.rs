@@ -9,6 +9,10 @@ const RAW_GLOB_PATTERNS: &[&str] = &[
     "**/*.txt",
     "**/*.snbt",
     "**/*.toml",
+    // Legacy pre-Anvil region files use the same directory layout as modern
+    // worlds, but their chunk schema cannot be flattened by the MCA handler.
+    // Keep them raw so old worlds remain fully restorable.
+    "**/*.mcr",
     // Some launchers and archive tools retain Minecraft's old NBT snapshots
     // with an additional gzip suffix. Preserve them byte-for-byte rather than
     // treating them as unhandled files.
