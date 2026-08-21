@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.8 (2026-08-21)
+
+Bug fixes
+
+- Restore over an existing world on Windows. MineCommit held the world's own
+  session.lock open while renaming the save directory aside, and Windows
+  refuses to rename a directory that still has a handle open inside it. The
+  restore failed with "Access is denied. (os error 5)" and rolled back.
+- Run the test suite on Windows as well as Linux, since the bug above could
+  not be reproduced on Linux at all.
+
 ## 0.4.7 (2026-08-21)
 
 Bug fixes
