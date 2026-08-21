@@ -201,7 +201,7 @@ jobs:
           cp target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb \
             MineCommit-${{ github.ref_name }}-x86_64.deb
           tar -C target/x86_64-unknown-linux-gnu/release \
-            -czf MineCommit-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
+            -czf MineCommit-GUI-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
             minecommit-gui
 
       - name: Upload artifact
@@ -210,7 +210,7 @@ jobs:
           name: minecommit-gui-debian-x86_64
           path: |
             MineCommit-${{ github.ref_name }}-x86_64.deb
-            MineCommit-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
+            MineCommit-GUI-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
           if-no-files-found: error
 
   release:
