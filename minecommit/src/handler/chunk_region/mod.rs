@@ -17,6 +17,27 @@ use nbt::{SectionsDump, restore_chunk, split_chunk};
 
 const FLATTEN_PATTERNS: &[&str] = &["**/region/r.*.*.mca"];
 const UNFLATTEN_PATTERNS: &[&str] = &["**/region/r.*.*.mca/timestamps"]; // timestamps is sentry
+/// Sentry for region files kept byte-for-byte because their chunks predate the
+/// 1.18 layout. See [`ChunkOutcome::PreAnvil118`].
+const RAW_UNFLATTEN_PATTERNS: &[&str] = &["**/region/r.*.*.mca/raw"];
+
+/// What flattening a single chunk produced.
+enum ChunkOutcome {
+    /// The chunk predates the Minecraft 1.18 layout, so the whole region file
+    /// has to be stored byte-for-byte instead.
+    ///
+    /// MineCommit's flattener understands only the 1.18+ layout, which places
+    /// `Status` and `sections` at the root of the chunk NBT. Worlds from 1.13
+    /// to 1.17 nest both under `Level`, and worlds older than 1.13 have no
+    /// `Status` at all, so neither can be split into sections and palettes.
+    /// A world upgraded in place can mix layouts inside one region file, so a
+    /// single pre-1.18 chunk disqualifies the entire file.
+    PreAnvil118,
+    /// The chunk is not fully generated and is intentionally not stored.
+    Incomplete,
+    /// `(chunk_x, chunk_z, other, sections_dump, inhabited_time, last_update)`
+    Flattened(Box<(i32, i32, BaseNbt, Vec<u8>, i64, i64)>),
+}
 
 pub(crate) struct ChunkRegionHandler;
 
@@ -36,26 +57,33 @@ impl Handler for ChunkRegionHandler {
                 let (region_x, region_z) = parse_xz(filename)
                     .with_context(|| format!("failed to parse region coordinates from {key}"))?;
                 let Some((timestamp_header, chunks)) =
-                    read_region(Cursor::new(data), region_x, region_z)
+                    read_region(Cursor::new(&data), region_x, region_z)
                         .with_context(|| format!("failed to read region from {key}"))?
                 else {
                     processed.push(key);
                     continue;
                 };
+
                 // Each section carries its own local palette, so chunks can be
                 // processed independently in parallel without a global mapping pass.
-                let mut result = chunks
+                let outcomes = chunks
                     .into_par_iter()
                     .map(|(chunk_x, chunk_z, nbt)| {
                         let nbt =
                             load_nbt(Cursor::new(&nbt)).context("failed to load chunk nbt")?;
-                        if nbt
-                            .string("Status")
-                            .context("missing 'Status' field in chunk nbt")?
-                            .to_string_lossy()
-                            != "minecraft:full"
-                        {
-                            return Ok(None);
+                        // Order matters: a chunk that is merely unfinished must
+                        // stay `Incomplete` (skipped, as before) rather than
+                        // dragging its whole region file into raw storage. Only
+                        // chunks that the flattener could not have handled at
+                        // all fall back to `PreAnvil118`.
+                        let Some(status) = nbt.string("Status") else {
+                            return Ok(ChunkOutcome::PreAnvil118);
+                        };
+                        if status.to_string_lossy() != "minecraft:full" {
+                            return Ok(ChunkOutcome::Incomplete);
+                        }
+                        if nbt.list("sections").is_none() {
+                            return Ok(ChunkOutcome::PreAnvil118);
                         }
                         let (other, sections) = split_chunk(nbt).with_context(|| {
                             format!("failed to process chunk ({chunk_x}, {chunk_z}) at file {key}")
@@ -77,19 +105,37 @@ impl Handler for ChunkRegionHandler {
                         let other = sort_nbt(other);
                         let mut sections_dump = Vec::with_capacity(200 * 1024);
                         sections.to_nbt().write(&mut sections_dump);
-                        Ok(Some((
+                        Ok(ChunkOutcome::Flattened(Box::new((
                             chunk_x,
                             chunk_z,
                             other,
                             sections_dump,
                             inhabited_time,
                             last_update,
-                        )))
+                        ))))
                     })
                     .collect::<Result<Vec<_>>>()
-                    .context("failed to process chunks")?
+                    .context("failed to process chunks")?;
+
+                // Old worlds cannot be flattened, but they must still round-trip.
+                // Store the file exactly as it is so a restore reproduces it
+                // byte-for-byte instead of failing the whole backup.
+                if outcomes
+                    .iter()
+                    .any(|outcome| matches!(outcome, ChunkOutcome::PreAnvil118))
+                {
+                    log::info!("Store pre-1.18 chunk region file {key} as raw data");
+                    storage.put(&format!("{key}/raw"), &data)?;
+                    processed.push(key);
+                    continue;
+                }
+
+                let mut result = outcomes
                     .into_iter()
-                    .flatten()
+                    .filter_map(|outcome| match outcome {
+                        ChunkOutcome::Flattened(chunk) => Some(*chunk),
+                        ChunkOutcome::Incomplete | ChunkOutcome::PreAnvil118 => None,
+                    })
                     .collect::<Vec<_>>();
 
                 // Sort by (cz, cx) for deterministic ordering matching unflatten glob order
@@ -161,6 +207,19 @@ impl Handler for ChunkRegionHandler {
 
     fn unflatten(self, save: &mut impl OdbWriter, storage: &impl OdbReader) -> Result<Vec<String>> {
         let mut processed = Vec::new();
+        for pattern in RAW_UNFLATTEN_PATTERNS {
+            for raw_key in storage.glob(pattern)? {
+                let Some(region_key) = raw_key.strip_suffix("/raw") else {
+                    continue;
+                };
+                log::info!("Process chunk region file (raw) {region_key}");
+                let data = storage
+                    .get(&raw_key)
+                    .with_context(|| format!("failed to read {raw_key}"))?;
+                save.put(region_key, &data)?;
+                processed.push(raw_key);
+            }
+        }
         for pattern in UNFLATTEN_PATTERNS {
             for ts_key in storage.glob(pattern)? {
                 log::info!("Process chunk region file (timestamps) {ts_key}");
@@ -289,5 +348,108 @@ impl Handler for ChunkRegionHandler {
             }
         }
         Ok(processed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::odb::LocalFsOdb;
+
+    const REGION_KEY: &str = "region/r.0.0.mca";
+
+    /// A pre-1.18 chunk: `Status` and `Sections` live under `Level`, so the
+    /// flattener cannot split it. Mirrors what an old or upgraded world holds.
+    fn legacy_chunk() -> Vec<u8> {
+        let mut level = NbtCompound::new();
+        level.insert("xPos", 0i32);
+        level.insert("zPos", 0i32);
+        level.insert("LastUpdate", 0i64);
+        level.insert("TerrainPopulated", 1i8);
+        level.insert("Sections", NbtTag::List(NbtList::Empty));
+        let mut root = NbtCompound::new();
+        root.insert("Level", NbtTag::Compound(level));
+        let mut buf = Vec::new();
+        BaseNbt::new("", root).write(&mut buf);
+        buf
+    }
+
+    /// A chunk carrying a root `Status` that is not `minecraft:full`, and no
+    /// root `sections`. Such proto-chunks must be skipped, never treated as
+    /// pre-1.18 — otherwise one of them would drag a whole modern region file
+    /// into raw storage and silently lose deduplication.
+    fn proto_chunk() -> Vec<u8> {
+        let mut root = NbtCompound::new();
+        root.insert("Status", "minecraft:structure_starts");
+        root.insert("xPos", 0i32);
+        root.insert("zPos", 0i32);
+        let mut buf = Vec::new();
+        BaseNbt::new("", root).write(&mut buf);
+        buf
+    }
+
+    fn region_bytes(chunks: Vec<(i32, i32, Vec<u8>)>) -> Vec<u8> {
+        let mut buf = Vec::new();
+        write_region(0, 0, &[0u8; 4096], chunks, Cursor::new(&mut buf))
+            .expect("write test region");
+        buf
+    }
+
+    fn save_with_region(bytes: &[u8]) -> (TempDir, LocalFsOdb) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut odb = LocalFsOdb::from_dir(dir.path().to_path_buf());
+        odb.put(REGION_KEY, bytes).expect("write region file");
+        (dir, odb)
+    }
+
+    #[test]
+    fn pre_1_18_region_is_stored_raw_and_restored_byte_for_byte() {
+        let bytes = region_bytes(vec![(0, 0, legacy_chunk())]);
+        let (_save_dir, save) = save_with_region(&bytes);
+        let storage_dir = tempfile::tempdir().expect("tempdir");
+        let mut storage = LocalFsOdb::from_dir(storage_dir.path().to_path_buf());
+
+        let processed = ChunkRegionHandler
+            .flatten(&save, &mut storage)
+            .expect("flatten must not fail on a pre-1.18 world");
+        assert_eq!(processed, vec![REGION_KEY.to_string()]);
+
+        // The whole file is kept verbatim under the raw sentry.
+        let stored = storage
+            .get(&format!("{REGION_KEY}/raw"))
+            .expect("region must be stored raw");
+        assert_eq!(stored, bytes);
+
+        // ...and restoring reproduces it exactly.
+        let restore_dir = tempfile::tempdir().expect("tempdir");
+        let mut restored = LocalFsOdb::from_dir(restore_dir.path().to_path_buf());
+        ChunkRegionHandler
+            .unflatten(&mut restored, &storage)
+            .expect("unflatten raw region");
+        assert_eq!(restored.get(REGION_KEY).expect("restored region"), bytes);
+    }
+
+    #[test]
+    fn unfinished_chunk_does_not_force_a_modern_region_to_raw() {
+        let bytes = region_bytes(vec![(0, 0, proto_chunk())]);
+        let (_save_dir, save) = save_with_region(&bytes);
+        let storage_dir = tempfile::tempdir().expect("tempdir");
+        let mut storage = LocalFsOdb::from_dir(storage_dir.path().to_path_buf());
+
+        ChunkRegionHandler
+            .flatten(&save, &mut storage)
+            .expect("flatten a region whose only chunk is unfinished");
+
+        assert!(
+            storage.get(&format!("{REGION_KEY}/raw")).is_err(),
+            "an unfinished chunk must be skipped, not send the region to raw storage"
+        );
+        assert!(
+            storage.get(&format!("{REGION_KEY}/timestamps")).is_ok(),
+            "the region should still be flattened"
+        );
     }
 }
