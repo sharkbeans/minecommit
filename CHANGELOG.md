@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.10 (2026-08-21)
+
+New features
+
+- Add "Download from cloud" for a computer that does not have the world yet.
+  Previously a world could only be added by selecting a folder that already
+  contained level.dat, so a second computer had no way to obtain a world that
+  existed only in the cloud, and had to copy it across by hand first.
+- Choose the cloud branch from the branches the repository actually has,
+  instead of typing one. A branch that did not match silently resolved to
+  "no backups yet" rather than reporting anything wrong.
+
+Bug fixes
+
+- Forget the previous repository's tracking refs when a world is pointed at a
+  different cloud repository, and drop the tracking ref for a branch that no
+  longer exists remotely. Cloud status is answered from cached refs without
+  contacting the network, so a deleted repository could keep reporting state,
+  and a fetch of a missing branch was treated as success while leaving the
+  stale ref in place.
+
 ## 0.4.9 (2026-08-21)
 
 Bug fixes
