@@ -171,22 +171,44 @@ pub fn git_count_objects(git_dir: impl AsRef<OsStr>) -> Result<RepoStats> {
 
 pub fn git_repack(git_dir: impl AsRef<OsStr>) -> Result<()> {
     log::info!("Repacking");
-    let cmd = git_cmd(
-        git_dir,
-        [
-            "-c",
-            "pack.deltaCacheLimit=65535",
-            "-c",
-            "pack.deltaCacheSize=1073741824", // 1GiB
-            "repack",
-            "--depth=4095",
-            "--window=2",
-            "-a",
-            "-d",
-            "-f",
-            "--path-walk",
-        ],
-    );
-    let _ = exec(cmd, None)?;
-    Ok(())
+    let git_dir = git_dir.as_ref();
+
+    // `--path-walk` groups objects by path and produces far better deltas for
+    // Minecraft region files, but it only exists in recent Git builds. Retry
+    // without it so repacking still works on the Git shipped by most distros.
+    match exec(repack_cmd(git_dir, true), None) {
+        Ok(_) => Ok(()),
+        Err(error) if rejected_unknown_option(&error, "path-walk") => {
+            log::info!("This Git build does not support `--path-walk`; repacking without it");
+            exec(repack_cmd(git_dir, false), None)?;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn repack_cmd(git_dir: &OsStr, path_walk: bool) -> Command {
+    let mut args = vec![
+        "-c",
+        "pack.deltaCacheLimit=65535",
+        "-c",
+        "pack.deltaCacheSize=1073741824", // 1GiB
+        "repack",
+        "--depth=4095",
+        "--window=2",
+        "-a",
+        "-d",
+        "-f",
+    ];
+    if path_walk {
+        args.push("--path-walk");
+    }
+    git_cmd(git_dir, args)
+}
+
+/// Detect the `error: unknown option \`<name>'` that older Git versions print
+/// when they are given a flag they do not know about.
+fn rejected_unknown_option(error: &anyhow::Error, option: &str) -> bool {
+    let message = format!("{error:#}");
+    message.contains("unknown option") && message.contains(option)
 }
