@@ -572,7 +572,7 @@ pub fn restore_commit(
     let save_dir = save_dir.as_ref();
     let git_dir = git_dir.as_ref();
     let existing_world = save_dir.exists();
-    let _world_lock = if existing_world {
+    let mut world_lock = if existing_world {
         Some(lock_inactive_world(save_dir)?)
     } else {
         anyhow::ensure!(
@@ -603,6 +603,11 @@ pub fn restore_commit(
 
     let backup_path = if existing_world {
         let backup = next_snapshot_path(save_dir)?;
+        // Windows refuses to rename a directory while any handle inside it is
+        // still open, and MineCommit's own session.lock handle lives in this
+        // one. The reconstruction above is finished, so release the lock first;
+        // the world is about to be moved aside regardless.
+        drop(world_lock.take());
         fs::rename(save_dir, &backup).with_context(|| {
             format!("failed to preserve existing Minecraft save at {save_dir:?} as {backup:?}")
         })?;
@@ -610,6 +615,7 @@ pub fn restore_commit(
     } else {
         None
     };
+    drop(world_lock);
 
     if let Err(error) = fs::rename(&staging_dir, save_dir) {
         if let Some(backup) = &backup_path {
@@ -843,6 +849,60 @@ mod tests {
         assert!(status.local_timestamp.is_some());
         assert_eq!(status.remote_device, None);
         assert_eq!(status.remote_timestamp, None);
+    }
+
+    /// Write the smallest thing MineCommit accepts as a Java save: a valid NBT
+    /// `level.dat` plus the `session.lock` that restore has to hold open.
+    fn write_minimal_save(dir: &Path) {
+        fs::create_dir_all(dir).expect("create save dir");
+        let mut root = simdnbt::owned::NbtCompound::new();
+        root.insert(
+            "Data",
+            simdnbt::owned::NbtTag::Compound(simdnbt::owned::NbtCompound::new()),
+        );
+        let mut level = Vec::new();
+        simdnbt::owned::BaseNbt::new("", root).write(&mut level);
+        fs::write(dir.join("level.dat"), level).expect("write level.dat");
+        fs::write(dir.join("session.lock"), b"\xe2\x98\x83").expect("write session.lock");
+    }
+
+    /// Restoring on top of a live world has to move the old save aside. On
+    /// Windows that rename fails with "Access is denied" if any handle inside
+    /// the directory is still open, and MineCommit holds the world's own
+    /// session.lock for the duration of the restore.
+    #[test]
+    fn restore_over_an_existing_world_preserves_it_as_a_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let save = dir.path().join("world");
+        write_minimal_save(&save);
+
+        let repo = init_bare();
+        let unprocessed = Config::new(
+            save.clone(),
+            repo.path().to_path_buf(),
+            vec![],
+            vec![],
+        )
+        .commit(
+            vec![],
+            "backup",
+            Some("refs/heads/main".to_string()),
+            Some("MineCommit Test"),
+            Some("test@example.com"),
+        )
+        .expect("commit save");
+        assert!(unprocessed.is_empty(), "unhandled files: {unprocessed:?}");
+        let head = git(repo.path(), &["rev-parse", "refs/heads/main"])
+            .trim()
+            .to_string();
+
+        // Restore back over the still-existing world.
+        let result = restore_commit(&save, repo.path(), &head).expect("restore over live world");
+
+        let backup = result.backup_path.expect("existing world must be preserved");
+        assert!(backup.join("level.dat").is_file(), "snapshot keeps old save");
+        assert!(save.join("level.dat").is_file(), "world was restored");
+        assert!(save.join("session.lock").is_file());
     }
 
     #[test]
