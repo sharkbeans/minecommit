@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.7.0 (2026-08-22)
+
+Breaking change
+
+- Sign in with GitHub instead of pasting an access token. GitHub shows a short
+  code, you enter it on github.com, and MineCommit waits: nothing is typed into
+  MineCommit and no password or token passes through it. Anyone who signed in
+  on 0.6.0 stays signed in; the token they pasted is still in Git's credential
+  store and still works.
+
+New features
+
+- Show that the app is loading its worlds when it starts. The world list was
+  empty and the panel beside it read "add a world to start backing it up" until
+  the worlds had been read, which said the opposite of the truth to anyone with
+  worlds already set up.
+
+Bug fixes
+
+- Replace the signed-out account menu with a plain "Sign in with GitHub"
+  button. A menu that opened to reveal a single item added a click and a place
+  to get stuck for no benefit.
+
+Internal
+
+- The GitHub OAuth client ID is compiled in from MINECOMMIT_GITHUB_CLIENT_ID.
+  It is public by design: the device flow exists for clients that cannot keep a
+  secret. A build without one refuses to sign in and says so, rather than
+  failing obscurely at GitHub.
+
 ## 0.6.0 (2026-08-22)
 
 New features
