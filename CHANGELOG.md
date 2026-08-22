@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.6.0 (2026-08-22)
+
+New features
+
+- Sign in to GitHub from MineCommit, and sign out again, from an account menu
+  in the top right. Until now the app had no idea who you were: cloud access
+  rode entirely on whatever Git's credential helper happened to hold, and
+  nothing in the interface said whether that would work.
+- Have MineCommit create the backup repository for you. Signed in, connecting a
+  world offers a private repository named after it, made on GitHub and
+  connected in one step, instead of sending you off to create one by hand and
+  come back with the address. Pointing at a repository you already have is
+  still offered alongside it.
+- Adding a world now leads straight into connecting it, rather than adding it
+  and leaving you to find the button. Signing in from that flow returns to it.
+- Back up a world without any cloud at all. The backup stays on this computer,
+  which is enough to undo a creeper, and the world can be connected later.
+- Put a second world in the repository the first one already uses, chosen from
+  a list, rather than creating a repository per world. One repository holding a
+  branch per world was always how MineCommit worked; nothing in the interface
+  said so.
+
+Bug fixes
+
+- Create a world's backup repository when the world is added. Adding a world
+  recorded where its backups would live without ever creating it, so the world
+  reported "is not a bare Git repository", could not be backed up or connected,
+  and no screen offered to create one. Worlds already added in that state are
+  repaired when they are next opened.
+
+Notes on the sign-in
+
+- MineCommit asks for a GitHub access token rather than your password, and the
+  "Get a token" button opens GitHub with the right settings already filled in.
+  The token goes to Git's own credential store -- the Credential Manager on
+  Windows, libsecret where it is available on Linux -- so pushes authenticate
+  without asking again. MineCommit never writes it to its own files. Signing
+  out removes it.
+- An existing credential helper is always left alone; one is only configured
+  if you have none.
+
 ## 0.5.1 (2026-08-22)
 
 Bug fixes
