@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { openUrl } from "@tauri-apps/plugin-opener"
 import { ExternalLink, FolderCog, Loader2, LogOut, UserRound } from "lucide-react"
@@ -13,15 +13,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
 import { useI18n } from "@/contexts/i18n"
 
 /** Lucide dropped its brand icons, and GitHub's mark is the recognisable one. */
@@ -51,6 +42,36 @@ function errorText(error: unknown) {
 
 /* ── The dropdown in the top right ───────────────────────────────────────── */
 
+/** One row in the account menu, styled to match the rest of the app's menus. */
+function MenuRow({
+  onClick,
+  children,
+}: {
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      className="flex min-h-7 w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none [&_svg]:size-4 [&_svg]:shrink-0"
+    >
+      {children}
+    </button>
+  )
+}
+
+/**
+ * The account menu.
+ *
+ * Written out by hand rather than with the shared dropdown primitive: that
+ * primitive's trigger does not open its menu in this app -- verified by
+ * dispatching a full pointer sequence at it and watching `aria-expanded` stay
+ * false, with the menu itself rendering correctly when forced open. This is the
+ * only menu MineCommit has and it holds three rows, so owning fifteen lines of
+ * open/close is cheaper than depending on machinery that does not work.
+ */
 export function AccountMenu({
   account,
   loaded,
@@ -66,6 +87,8 @@ export function AccountMenu({
   onChooseRepositories: () => void
 }) {
   const { t } = useI18n()
+  const [open, setOpen] = useState(false)
+  const holder = useRef<HTMLDivElement>(null)
 
   const signOut = useCallback(async () => {
     try {
@@ -75,6 +98,24 @@ export function AccountMenu({
     }
     onSignedOut()
   }, [onSignedOut])
+
+  // A menu that cannot be dismissed by looking away is a trap, so close on a
+  // press anywhere else and on Escape.
+  useEffect(() => {
+    if (!open) return
+    const onPress = (event: MouseEvent) => {
+      if (!holder.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false)
+    }
+    document.addEventListener("mousedown", onPress)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("mousedown", onPress)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [open])
 
   // Reading the saved account takes a moment. Rendering "Sign in to GitHub"
   // meanwhile would tell an already signed-in player the opposite of the truth
@@ -95,44 +136,55 @@ export function AccountMenu({
     )
   }
 
+  const choose = (act: () => void) => () => {
+    setOpen(false)
+    act()
+  }
+
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger
-        render={
-          <Button variant="ghost" size="sm" className="gap-2">
-            {account.avatar_url ? (
-              <img src={account.avatar_url} alt="" className="size-5 rounded-full" />
-            ) : (
-              <UserRound />
-            )}
-            <span className="max-w-32 truncate">{account.login}</span>
-          </Button>
-        }
-      />
-      <DropdownMenuContent align="end" className="w-56">
-        <DropdownMenuLabel>{t("gh.account")}</DropdownMenuLabel>
-        <DropdownMenuGroup>
-          <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+    <div className="relative" ref={holder}>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="gap-2"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        {account.avatar_url ? (
+          <img src={account.avatar_url} alt="" className="size-5 rounded-full" />
+        ) : (
+          <UserRound />
+        )}
+        <span className="max-w-32 truncate">{account.login}</span>
+      </Button>
+
+      {open && (
+        <div
+          role="menu"
+          className="absolute top-full right-0 z-50 mt-1 w-56 rounded-2xl bg-popover p-1 text-popover-foreground shadow-lg ring-1 ring-foreground/5 dark:ring-foreground/10"
+        >
+          <p className="px-2 py-1 text-xs text-muted-foreground">
             {t("gh.signedInAs", { login: account.login })}
-          </DropdownMenuLabel>
-          <DropdownMenuItem onClick={onChooseRepositories}>
+          </p>
+          <MenuRow onClick={choose(onChooseRepositories)}>
             <FolderCog />
             {t("gh.chooseRepos")}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onClick={() => openExternal(`https://github.com/${account.login}`)}
+          </MenuRow>
+          <MenuRow
+            onClick={choose(() => openExternal(`https://github.com/${account.login}`))}
           >
             <ExternalLink />
             {t("gh.openProfile")}
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => void signOut()}>
+          </MenuRow>
+          <div className="my-1 h-px bg-border" />
+          <MenuRow onClick={choose(() => void signOut())}>
             <LogOut />
             {t("gh.signOut")}
-          </DropdownMenuItem>
-        </DropdownMenuGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
+          </MenuRow>
+        </div>
+      )}
+    </div>
   )
 }
 
