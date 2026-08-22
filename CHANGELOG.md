@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1 (2026-08-22)
+
+Bug fixes
+
+- Back up worlds that contain a `.dat` file which is not NBT. MineCommit
+  claims every `.dat` in a save, and mods put files there that were never NBT
+  -- Lunar Client's minimap tiles, for one. The whole backup ended with
+  "nbt data is empty" over a file the player did not know existed. Such files
+  are now stored byte for byte and restored unchanged.
+
 ## 0.8.0 (2026-08-22)
 
 Breaking change
