@@ -13,6 +13,20 @@ use anyhow::{Context, Result};
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// `git`, configured so it never flashes a console window.
+///
+/// `git.exe` is a console application, so on Windows every invocation from a
+/// GUI process opens a black window for as long as it runs. A single backup
+/// runs hundreds of them, which makes the app look like it has been taken over
+/// by malware. On other platforms this is plain `Command::new("git")`.
+pub fn git_command() -> Command {
+    #[allow(unused_mut)] // `creation_flags` is the only mutation, and only on Windows.
+    let mut cmd = Command::new("git");
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 pub fn exec(mut cmd: Command, stdin: Option<String>) -> Result<String> {
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -62,7 +76,7 @@ pub fn git_cmd(
     git_dir: impl AsRef<OsStr>,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
 ) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = git_command();
     cmd.arg("--git-dir").arg(git_dir);
     for arg in args {
         cmd.arg(arg);
@@ -211,4 +225,66 @@ fn repack_cmd(git_dir: &OsStr, path_walk: bool) -> Command {
 fn rejected_unknown_option(error: &anyhow::Error, option: &str) -> bool {
     let message = format!("{error:#}");
     message.contains("unknown option") && message.contains(option)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path};
+
+    /// Every Git invocation must be built by [`git_command`], directly or via
+    /// [`git_cmd`], or Windows opens a console window for it. A GUI running
+    /// hundreds of them per backup then looks like it is being taken over by
+    /// malware.
+    ///
+    /// There is no way to observe a console window from a test, and the bug is
+    /// invisible on Linux, so guard the source instead. Test code may spawn
+    /// Git however it likes, so scanning stops at the file's `mod tests`, which
+    /// is the last item in every file in this workspace.
+    #[test]
+    fn no_git_is_spawned_outside_git_command() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crate directory has a parent");
+
+        // This file defines `git_command`, so it is the one place allowed to
+        // name the raw constructor.
+        let definition = workspace.join("minecommit/src/utils/cmd.rs");
+
+        let mut offenders = Vec::new();
+        visit(workspace, &mut |file| {
+            if file == definition {
+                return;
+            }
+            let source = fs::read_to_string(file).unwrap_or_default();
+            for (index, line) in source.lines().enumerate() {
+                if line.trim_start().starts_with("mod tests") {
+                    break;
+                }
+                if line.contains(r#"Command::new("git")"#) {
+                    offenders.push(format!("{}:{}", file.display(), index + 1));
+                }
+            }
+        });
+
+        assert!(
+            offenders.is_empty(),
+            "these spawn Git directly instead of through `git_command()`, \
+             which flashes a console window on Windows:\n  {}",
+            offenders.join("\n  ")
+        );
+    }
+
+    fn visit(dir: &Path, found: &mut impl FnMut(&Path)) {
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if !matches!(path.file_name().and_then(|n| n.to_str()), Some("target" | "node_modules" | ".git")) {
+                    visit(&path, found);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                found(&path);
+            }
+        }
+    }
 }

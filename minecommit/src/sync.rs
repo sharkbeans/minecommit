@@ -13,12 +13,14 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use std::process::Command;
 
 #[cfg(not(unix))]
 use std::fs::TryLockError;
 
-use crate::{utils::cmd::git_cmd, Config};
+use crate::{
+    utils::cmd::{git_cmd, git_command},
+    Config,
+};
 
 pub const DEFAULT_BRANCH: &str = "main";
 const DEFAULT_REMOTE: &str = "origin";
@@ -267,7 +269,7 @@ impl RemoteSync {
     pub fn list_remote_branches(url: &str) -> Result<Vec<String>> {
         anyhow::ensure!(!url.trim().is_empty(), "remote URL cannot be empty");
         ensure_no_embedded_https_credentials(url)?;
-        let output = Command::new("git")
+        let output = git_command()
             .args(["ls-remote", "--heads", url])
             .output()
             .context("failed to start Git; install Git and ensure it is on PATH")?;
@@ -787,6 +789,8 @@ fn next_snapshot_path(save_dir: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use tempfile::TempDir;
 
     use super::*;

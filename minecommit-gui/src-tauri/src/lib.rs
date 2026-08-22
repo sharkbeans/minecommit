@@ -5,13 +5,12 @@ use minecommit::{
         backup_message_with_device, lock_inactive_world, restore_commit, RemoteStatus, RemoteSync,
         DEFAULT_BRANCH,
     },
-    utils::cmd::{git_cmd, git_count_objects, git_repack},
+    utils::cmd::{git_cmd, git_command, git_count_objects, git_repack},
     Config,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -304,12 +303,12 @@ async fn perform_commit(
 
         // 7. Persist author info to git global config
         if !author_name.is_empty() {
-            let _ = Command::new("git")
+            let _ = git_command()
                 .args(["config", "--global", "user.name", &author_name])
                 .output();
         }
         if !author_email.is_empty() {
-            let _ = Command::new("git")
+            let _ = git_command()
                 .args(["config", "--global", "user.email", &author_email])
                 .output();
         }
@@ -591,7 +590,7 @@ fn get_cloud_status(
 
 #[tauri::command]
 fn check_repo_exists(repo_path: String) -> Result<bool, String> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(["--git-dir", &repo_path, "rev-parse", "--is-bare-repository"])
         .output()
         .map_err(|e| format!("Failed to check repository existence: {}", e))?;
@@ -606,7 +605,7 @@ fn init_bare_repo(repo_path: String, default_branch: String) -> Result<(), Strin
             .map_err(|e| format!("Failed to make parent directory: {}", e))?;
     }
 
-    let output = Command::new("git")
+    let output = git_command()
         .args([
             "init",
             "--bare",
@@ -656,14 +655,14 @@ fn save_saves(data_dir: &PathBuf, saves: &[Save]) -> Result<(), AppError> {
 
 #[tauri::command]
 fn get_git_author() -> CommitAuthor {
-    let name = Command::new("git")
+    let name = git_command()
         .args(["config", "--global", "user.name"])
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    let email = Command::new("git")
+    let email = git_command()
         .args(["config", "--global", "user.email"])
         .output()
         .ok()
@@ -681,11 +680,11 @@ fn list_saves(state: tauri::State<AppState>) -> Vec<Save> {
 
 #[tauri::command]
 fn set_git_author(name: String, email: String) -> Result<CommitAuthor, AppError> {
-    Command::new("git")
+    git_command()
         .args(["config", "--global", "user.name", &name])
         .output()
         .map_err(|e| AppError::Io(e))?;
-    Command::new("git")
+    git_command()
         .args(["config", "--global", "user.email", &email])
         .output()
         .map_err(|e| AppError::Io(e))?;
@@ -779,7 +778,7 @@ fn access_save(state: tauri::State<AppState>, name: String) -> Result<(), AppErr
 
 #[tauri::command]
 fn list_branches(repo_path: String) -> Result<Vec<String>, String> {
-    let output = Command::new("git")
+    let output = git_command()
         .args([
             "--git-dir",
             &repo_path,
@@ -1060,7 +1059,7 @@ fn clone_worker(
         fs::create_dir_all(parent).map_err(|e| format!("Failed to make parent directory: {e}"))?;
     }
     log::info!("Creating local backup repository for cloud world");
-    let init = Command::new("git")
+    let init = git_command()
         .args([
             "init",
             "--bare",
