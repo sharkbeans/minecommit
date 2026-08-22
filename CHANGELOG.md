@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.11 (2026-08-22)
+
+Bug fixes
+
+- Stop flashing console windows on Windows. `git.exe` is a console
+  application, so Windows opened a black window for every invocation the GUI
+  made directly — checking a repository, listing branches, reading the commit
+  author — and a screen full of them appearing and vanishing looked like
+  malware. The core already suppressed this for the commands it runs itself;
+  now every Git invocation in the workspace goes through one constructor that
+  sets `CREATE_NO_WINDOW`, and a test fails if a new one does not.
+
 ## 0.4.10 (2026-08-21)
 
 New features
