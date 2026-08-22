@@ -34,6 +34,26 @@ jobs:
       - name: Run tests
         run: cargo test --package minecommit --package minecommit-cli
 
+  frontend:
+    name: Check the GUI frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        working-directory: minecommit-gui
+        run: bun install --frozen-lockfile
+
+      # `invoke` resolves its arguments by name at runtime, so a renamed command
+      # parameter type-checks and then fails in front of the user. The Tauri
+      # build below compiles the frontend but cannot notice that.
+      - name: Typecheck and check Tauri command arguments
+        working-directory: minecommit-gui
+        run: bun run check
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -242,6 +262,7 @@ jobs:
     name: Create Release
     needs:
       - test
+      - frontend
       - build
       - build-tauri-windows
       - build-tauri-linux

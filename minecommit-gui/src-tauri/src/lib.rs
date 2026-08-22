@@ -1626,6 +1626,42 @@ mod tests {
     }
 
     #[test]
+    fn only_folders_holding_level_dat_count_as_worlds() {
+        // The "add a world" list is built from this, so anything else in the
+        // saves folder -- a screenshot, a leftover zip, an empty directory --
+        // must not appear as something to back up.
+        let saves = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(saves.path().join("My World")).unwrap();
+        fs::write(saves.path().join("My World/level.dat"), b"nbt").unwrap();
+        fs::create_dir(saves.path().join("not-a-world")).unwrap();
+        fs::write(saves.path().join("loose-file.zip"), b"zip").unwrap();
+
+        let worlds =
+            list_worlds_in_folder(saves.path().to_string_lossy().to_string()).expect("scan");
+
+        assert_eq!(worlds.len(), 1);
+        assert_eq!(worlds[0].name, "My World");
+        assert!(worlds[0].last_played.is_some());
+    }
+
+    #[test]
+    fn a_folder_that_is_not_there_is_reported_rather_than_read_as_empty() {
+        let missing = tempfile::tempdir().expect("tempdir");
+        let path = missing.path().join("gone").to_string_lossy().to_string();
+        assert!(list_worlds_in_folder(path).is_err());
+    }
+
+    #[test]
+    fn a_world_nobody_has_open_is_idle_and_dated() {
+        let save = tempfile::tempdir().expect("tempdir");
+        fs::write(save.path().join("level.dat"), b"nbt").unwrap();
+
+        let state = world_state(save.path().to_string_lossy().to_string());
+        assert!(state.idle, "a world with no session.lock is not in use");
+        assert!(state.last_played.is_some());
+    }
+
+    #[test]
     fn the_saves_folder_default_ends_at_the_saves_directory() {
         // The dashboard opens on this path, so a wrong one means an empty
         // "add a world" list on a fresh install.

@@ -34,6 +34,12 @@ function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** Join a folder and a name using whichever separator the folder already uses. */
+function joinPath(folder: string, name: string) {
+  const separator = folder.includes("\\") && !folder.includes("/") ? "\\" : "/"
+  return `${folder.replace(/[\\/]+$/, "")}${separator}${name}`
+}
+
 /* ── Add a world ─────────────────────────────────────────────────────────── */
 
 type AddTab = "local" | "cloud"
@@ -253,7 +259,9 @@ function AddFromCloud({
     setError("")
     setBranches(null)
     try {
-      const found = await invoke<string[]>("list_remote_branches", { url: address.trim() })
+      const found = await invoke<string[]>("list_remote_branches", {
+        remoteUrl: address.trim(),
+      })
       setBranches(found)
       const first = found[0] ?? ""
       setBranch(first)
@@ -274,7 +282,7 @@ function AddFromCloud({
         "clone_save_from_cloud",
         {
           name: name.trim(),
-          savePath: `${savesFolder}/${name.trim()}`,
+          savePath: joinPath(savesFolder, name.trim()),
           remoteUrl: address.trim(),
           branch,
         }
