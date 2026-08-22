@@ -1595,10 +1595,6 @@ async fn backup_and_upload(
 pub struct GitHubAccount {
     pub login: String,
     pub avatar_url: Option<String>,
-    /// Whether a repository can be created without signing in again. The token
-    /// lives in Git's credential store, which MineCommit does not read back, so
-    /// this is true only for the session it was granted in.
-    pub can_create_repository: bool,
 }
 
 /// GitHub asks for this, and refuses requests without one.
@@ -1614,8 +1610,20 @@ const GITHUB_CLIENT_ID: &str = match option_env!("MINECOMMIT_GITHUB_CLIENT_ID") 
     None => "",
 };
 
-/// Enough to push to and create the player's own backup repositories.
-const GITHUB_SCOPE: &str = "repo";
+/// The app's name in its URL, for sending the player to choose which
+/// repositories MineCommit may touch.
+const GITHUB_APP_SLUG: &str = match option_env!("MINECOMMIT_GITHUB_APP_SLUG") {
+    Some(slug) => slug,
+    None => "",
+};
+
+/// A repository the player has given MineCommit access to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrantedRepository {
+    pub full_name: String,
+    pub clone_url: String,
+    pub private: bool,
+}
 
 /// What GitHub told us to show the player, and how to wait for them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1754,6 +1762,40 @@ fn ensure_command_succeeded(output: std::process::Output, context: &str) -> Resu
     }
 }
 
+/// Read the token back out of Git's credential store.
+///
+/// Only attempted when MineCommit believes it is signed in, so a credential
+/// helper with a user interface is not made to ask about an account that was
+/// never stored.
+fn read_git_credential(login: &str) -> Option<String> {
+    use std::io::Write;
+
+    let mut child = git_command()
+        .args(["credential", "fill"])
+        // A helper that cannot answer silently must fail rather than block on a
+        // prompt no one is watching.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    child
+        .stdin
+        .as_mut()?
+        .write_all(credential_description(login, None).as_bytes())
+        .ok()?;
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("password="))
+        .map(str::to_string)
+        .filter(|token| !token.is_empty())
+}
+
 /// Hand the token to Git's credential store so pushes and fetches authenticate
 /// without asking. MineCommit never writes it to its own files.
 fn store_git_credential(login: &str, token: &str) -> Result<(), String> {
@@ -1809,7 +1851,7 @@ async fn github_start_sign_in(
     let response = github_client()?
         .post("https://github.com/login/device/code")
         .header("Accept", "application/json")
-        .form(&[("client_id", client_id), ("scope", GITHUB_SCOPE)])
+        .form(&[("client_id", client_id)])
         .send()
         .await
         .map_err(|e| format!("Could not reach GitHub: {e}"))?;
@@ -1897,7 +1939,6 @@ async fn github_poll_sign_in(
             account: GitHubAccount {
                 login,
                 avatar_url,
-                can_create_repository: true,
             },
         });
     }
@@ -1950,7 +1991,6 @@ fn github_account(state: tauri::State<AppState>) -> Option<GitHubAccount> {
     Some(GitHubAccount {
         login: settings.github_login,
         avatar_url: Some(settings.github_avatar).filter(|url| !url.is_empty()),
-        can_create_repository: state.github_token.lock().unwrap().is_some(),
     })
 }
 
@@ -1973,60 +2013,101 @@ fn github_sign_out(state: tauri::State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// Create a private repository to hold a world's backups, and return the
-/// address to connect it to.
-#[tauri::command]
-async fn create_github_repository(
-    state: tauri::State<'_, AppState>,
-    name: String,
-) -> Result<String, String> {
-    let name = name.trim().to_string();
-    if name.is_empty() {
-        return Err("Give the repository a name".into());
+/// The token for the signed-in account, from this session or from Git's store.
+fn current_token(state: &AppState) -> Option<String> {
+    if let Some(token) = state.github_token.lock().unwrap().clone() {
+        return Some(token);
     }
+    let login = read_settings(&state.data_dir).github_login;
+    if login.trim().is_empty() {
+        return None;
+    }
+    let token = read_git_credential(&login)?;
+    *state.github_token.lock().unwrap() = Some(token.clone());
+    Some(token)
+}
 
-    let token = state
-        .github_token
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("Sign in to GitHub again to create a repository from here")?;
+/// Where the player chooses which repositories MineCommit may use.
+#[tauri::command]
+fn github_install_url() -> Result<String, String> {
+    if GITHUB_APP_SLUG.trim().is_empty() {
+        return Err("This build of MineCommit has no GitHub application configured.".into());
+    }
+    Ok(format!(
+        "https://github.com/apps/{GITHUB_APP_SLUG}/installations/new"
+    ))
+}
 
-    let response = github_client()?
-        .post("https://api.github.com/user/repos")
+/// The repositories the player has granted MineCommit access to.
+///
+/// This is the whole of what MineCommit can reach: repositories they picked,
+/// nothing else. Listing them means a world is connected by choosing from that
+/// list rather than by pasting an address.
+#[tauri::command]
+async fn github_repositories(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<GrantedRepository>, String> {
+    let token = current_token(&state).ok_or("Sign in to GitHub first")?;
+    let client = github_client()?;
+
+    let installations: serde_json::Value = client
+        .get("https://api.github.com/user/installations")
         .bearer_auth(&token)
         .header("Accept", "application/vnd.github+json")
-        .json(&serde_json::json!({
-            "name": name,
-            "private": true,
-            // A first upload can only fast-forward, so the repository has to be
-            // empty: no README, no .gitignore, no licence.
-            "auto_init": false,
-            "description": "Minecraft world backups, made by MineCommit",
-        }))
         .send()
         .await
-        .map_err(|e| format!("Could not reach GitHub: {e}"))?;
+        .map_err(|e| format!("Could not reach GitHub: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("GitHub sent something unexpected: {e}"))?;
 
-    let status = response.status();
-    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    let ids: Vec<u64> = installations
+        .get("installations")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|entry| entry.get("id").and_then(|v| v.as_u64()))
+                .collect()
+        })
+        .unwrap_or_default();
 
-    if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-        return Err(format!("You already have a repository named {name}"));
+    let mut granted = Vec::new();
+    for id in ids {
+        let page: serde_json::Value = client
+            .get(format!(
+                "https://api.github.com/user/installations/{id}/repositories?per_page=100"
+            ))
+            .bearer_auth(&token)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+            .map_err(|e| format!("Could not reach GitHub: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("GitHub sent something unexpected: {e}"))?;
+
+        let Some(list) = page.get("repositories").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for repo in list {
+            let text = |key: &str| repo.get(key).and_then(|v| v.as_str()).map(str::to_string);
+            let (Some(full_name), Some(clone_url)) = (text("full_name"), text("clone_url")) else {
+                continue;
+            };
+            granted.push(GrantedRepository {
+                full_name,
+                clone_url,
+                private: repo
+                    .get("private")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            });
+        }
     }
-    if !status.is_success() {
-        let message = body
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("GitHub refused to create the repository");
-        return Err(format!("{message} ({status})"));
-    }
-
-    body.get("clone_url")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| "GitHub created the repository but did not say where it is".into())
+    granted.sort_by(|a, b| a.full_name.cmp(&b.full_name));
+    Ok(granted)
 }
+
 
 pub fn run() {
     tauri::Builder::default()
@@ -2083,8 +2164,9 @@ pub fn run() {
             github_poll_sign_in,
             github_cancel_sign_in,
             github_account,
+            github_install_url,
+            github_repositories,
             github_sign_out,
-            create_github_repository,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
