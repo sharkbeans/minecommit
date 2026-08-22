@@ -5,7 +5,7 @@ use minecommit::{
         backup_message_with_device, current_device_name, lock_inactive_world, restore_commit,
         RemoteStatus, RemoteSync, DEFAULT_BRANCH,
     },
-    utils::cmd::{git_cmd, git_command, git_count_objects, git_repack},
+    utils::cmd::{git_cmd, git_command, git_count_objects, git_repack, repack_is_worthwhile},
     Config,
 };
 use serde::{Deserialize, Serialize};
@@ -243,8 +243,19 @@ fn commit_blocking(
 
     // 5. Optional repack
     if use_repack {
-        if let Err(e) = git_repack(&git_dir_path) {
-            log::warn!("Repack failed: {e}");
+        // Repacking a large world costs minutes, so it is only paid for when
+        // there is enough loose material to be worth folding in. Skipping it
+        // leaves loose objects behind, which Git and the next upload both cope
+        // with perfectly well.
+        let worthwhile = git_count_objects(&git_dir_path)
+            .map(|stats| repack_is_worthwhile(&stats))
+            .unwrap_or(true);
+        if worthwhile {
+            if let Err(e) = git_repack(&git_dir_path) {
+                log::warn!("Repack failed: {e}");
+            }
+        } else {
+            log::info!("Not enough new data to be worth repacking; skipping");
         }
     } else {
         log::warn!("--repack is not enabled, Git repository can get bloated");

@@ -1,7 +1,7 @@
 use std::{
     ffi::OsStr,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -183,6 +183,22 @@ pub fn git_count_objects(git_dir: impl AsRef<OsStr>) -> Result<RepoStats> {
     Ok(stats)
 }
 
+/// How many loose objects justify paying for a repack.
+///
+/// A full repack of a multi-gigabyte world takes many minutes, and running one
+/// after every backup spends all of it on almost nothing: an evening of play
+/// adds a few hundred objects to a pack holding hundreds of thousands. This is
+/// Git's own `gc.auto` threshold, so loose objects are still folded in
+/// regularly without charging for it every time.
+pub const LOOSE_OBJECTS_BEFORE_REPACK: u64 = 6700;
+
+/// Whether repacking is worth its cost right now.
+pub fn repack_is_worthwhile(stats: &RepoStats) -> bool {
+    // Nothing packed yet: the first repack is what makes a world small, and
+    // there is no cheaper moment to do it.
+    stats.packs == 0 || stats.count >= LOOSE_OBJECTS_BEFORE_REPACK
+}
+
 pub fn git_repack(git_dir: impl AsRef<OsStr>) -> Result<()> {
     log::info!("Repacking");
     let git_dir = git_dir.as_ref();
@@ -190,15 +206,84 @@ pub fn git_repack(git_dir: impl AsRef<OsStr>) -> Result<()> {
     // `--path-walk` groups objects by path and produces far better deltas for
     // Minecraft region files, but it only exists in recent Git builds. Retry
     // without it so repacking still works on the Git shipped by most distros.
-    match exec(repack_cmd(git_dir, true), None) {
-        Ok(_) => Ok(()),
+    match exec_with_heartbeat(repack_cmd(git_dir, true), git_dir) {
+        Ok(()) => Ok(()),
         Err(error) if rejected_unknown_option(&error, "path-walk") => {
             log::info!("This Git build does not support `--path-walk`; repacking without it");
-            exec(repack_cmd(git_dir, false), None)?;
-            Ok(())
+            exec_with_heartbeat(repack_cmd(git_dir, false), git_dir)
         }
         Err(error) => Err(error),
     }
+}
+
+/// Run a repack, reporting that it is still going.
+///
+/// Git only draws progress when its stderr is a terminal, and MineCommit pipes
+/// it, so a repack of a large world printed nothing at all for however many
+/// minutes it took -- indistinguishable from a hang. Git's own progress cannot
+/// be turned back on from here, so the growing pack it is writing is reported
+/// instead, which is the thing worth watching anyway.
+fn exec_with_heartbeat(mut cmd: Command, git_dir: &OsStr) -> Result<()> {
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    log::debug!("command: {:?}", cmd);
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to run command {cmd:?}"))?;
+
+    let pack_dir = PathBuf::from(git_dir).join("objects").join("pack");
+    let started = std::time::Instant::now();
+    let mut next_report = std::time::Duration::from_secs(10);
+
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("failed to wait command {cmd:?}"))?
+        {
+            let output = child
+                .wait_with_output()
+                .with_context(|| format!("failed to read output of {cmd:?}"))?;
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            for line in stderr.lines() {
+                log::debug!("stderr: {line:?}");
+            }
+            anyhow::ensure!(status.success(), "command {cmd:?} failed: {stderr}");
+            log::info!("Repacking finished in {}s", started.elapsed().as_secs());
+            return Ok(());
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        if started.elapsed() >= next_report {
+            next_report += std::time::Duration::from_secs(10);
+            match in_progress_pack_mib(&pack_dir) {
+                Some(written) => log::info!(
+                    "Still repacking after {}s, {written:.0} MiB written so far",
+                    started.elapsed().as_secs()
+                ),
+                None => log::info!("Still repacking after {}s", started.elapsed().as_secs()),
+            }
+        }
+    }
+}
+
+/// Total size of the temporary packs Git is currently writing, in MiB.
+fn in_progress_pack_mib(pack_dir: &Path) -> Option<f64> {
+    let entries = std::fs::read_dir(pack_dir).ok()?;
+    let bytes: u64 = entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("tmp_pack_"))
+        })
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|meta| meta.len())
+        .sum();
+    (bytes > 0).then(|| bytes as f64 / 1024.0 / 1024.0)
 }
 
 fn repack_cmd(git_dir: &OsStr, path_walk: bool) -> Command {
@@ -286,5 +371,45 @@ mod tests {
                 found(&path);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod repack_policy_tests {
+    use super::*;
+
+    fn stats(loose: u64, packs: u64) -> RepoStats {
+        RepoStats {
+            count: loose,
+            size_mib: 0.0,
+            in_pack: 0,
+            packs,
+            size_pack_mib: 0.0,
+            prune_packable: 0,
+            garbage: 0,
+            size_garbage_mib: 0.0,
+        }
+    }
+
+    #[test]
+    fn the_first_backup_always_repacks() {
+        // Nothing is packed yet, and this is the repack that makes a world
+        // small enough to be worth uploading.
+        assert!(repack_is_worthwhile(&stats(0, 0)));
+        assert!(repack_is_worthwhile(&stats(500_000, 0)));
+    }
+
+    #[test]
+    fn an_evening_of_play_does_not_pay_for_a_full_repack() {
+        // A few hundred new objects against a pack holding hundreds of
+        // thousands: repacking here spent minutes to save almost nothing, and
+        // looked like a hang while it did.
+        assert!(!repack_is_worthwhile(&stats(400, 1)));
+        assert!(!repack_is_worthwhile(&stats(LOOSE_OBJECTS_BEFORE_REPACK - 1, 1)));
+    }
+
+    #[test]
+    fn enough_loose_objects_earn_a_repack() {
+        assert!(repack_is_worthwhile(&stats(LOOSE_OBJECTS_BEFORE_REPACK, 1)));
     }
 }
