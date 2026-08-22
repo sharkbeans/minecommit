@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.8.2 (2026-08-22)
+
+Bug fixes
+
+- Say that repacking is still running. Git only draws progress when its stderr
+  is a terminal, and MineCommit pipes it, so compressing a large world printed
+  nothing at all for however many minutes it took, which is indistinguishable
+  from a freeze. It now reports every ten seconds, with how much of the new
+  pack has been written.
+- Stop repacking after every backup. The repack recomputes every delta from
+  scratch, which is what makes a world small, but redoing it because an evening
+  of play added a few hundred objects to a pack holding hundreds of thousands
+  is minutes spent for almost nothing. It now runs on the first backup and once
+  loose objects pass Git's own threshold; otherwise it is skipped, which costs
+  nothing because Git and the upload both handle loose objects.
+
+Note on large worlds
+
+- The first backup of a multi-gigabyte world writes hundreds of thousands of
+  small files and then reads them all back. Measured on Linux, repacking scales
+  linearly at roughly eight thousand objects a second, so even a million-object
+  world takes a couple of minutes. On Windows the same work can take far longer
+  because real-time virus scanning inspects every one of those files;
+  excluding the minecommit folder from Windows Defender avoids it.
+
 ## 0.8.1 (2026-08-22)
 
 Bug fixes
