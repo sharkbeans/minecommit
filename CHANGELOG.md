@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.9.0 (2026-08-22)
+
+The app now explains itself. It was built for someone who already knew what it
+did; this release is for a Minecraft player who has never used Git and may not
+have a GitHub account.
+
+New
+
+- A welcome screen on first run, saying what MineCommit promises rather than
+  asking for a world it has not yet earned.
+- A guide behind the header, answering what decides whether someone trusts the
+  app with a world they care about: that backups never overwrite, that closing
+  Minecraft comes first, what happens when two computers disagree, that a
+  restore keeps the world it replaced, why GitHub, and what it can reach.
+- A walkthrough for setting up online backup. Two of its steps happen on
+  github.com and MineCommit cannot do either for you -- creating a repository
+  or granting access to one both need authority over your whole account, which
+  is exactly the breadth that picking individual repositories avoids. So it
+  names the buttons in GitHub's own words, and watches for the permission
+  rather than asking you to come back and press refresh.
+- Downloading a world from GitHub no longer asks for a URL. You are signed in
+  and the spaces you granted are already known, so it is two dropdowns. Pasting
+  a link is still there for a world someone else shared with you.
+
+Loading
+
+- The account chip said "Sign in to GitHub" to already signed-in players until
+  the saved account finished loading. World badges, the last-backup line and
+  the history all appeared out of nothing. Each now has a placeholder of the
+  right shape.
+- A backup counts its own elapsed time and says outright, past twenty seconds,
+  that the first backup of a world takes minutes and is safe to leave running.
+
+Bug fixes
+
+- The copies a restore leaves behind were offered as worlds to back up. They
+  hold a level.dat like any real world, and two entries differing only by a
+  Unix timestamp are not something you can tell apart.
+- A scan of the saves folder that ran before the folder finished loading left a
+  red error on screen for the rest of the dialog's life, underneath the list
+  that had since loaded correctly.
+- The repository dropdown rendered blank whenever its stored selection did not
+  match the loaded list, above a button that did nothing and never said why.
+- Signed in with no repositories granted was an empty dropdown and no way
+  forward.
+- A footer label overflowed its dialog. The interface is entirely monospace, so
+  English runs about 1.6x wider than it looks in the source.
+- The note box sat below "Back up now", which is where a note is one nobody
+  writes, and Restore was invisible until you hovered the row it belonged to.
+- The saves folder path filled the header on a Prism or MultiMC install.
+
 ## 0.8.2 (2026-08-22)
 
 Bug fixes
