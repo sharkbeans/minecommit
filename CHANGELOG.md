@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.5.0 (2026-08-22)
+
+The dashboard has been rebuilt around what a player is trying to do, rather
+than around the Git operations underneath.
+
+Breaking change
+
+- "Create backup" and "Upload" are now one button. Keeping them apart was the
+  most confusing thing about MineCommit: backing up without uploading left the
+  world safe on one computer while the player believed it was everywhere. One
+  action now records the world and sends it to the cloud, and reports the two
+  halves separately if only the upload fails -- in which case the world is
+  still safely backed up and the next upload carries it along.
+
+New features
+
+- A single screen: worlds down the left, and for the selected world one card
+  saying what to do about it. The card reads the world's state and offers
+  exactly one action, so there is never a question of which button to press or
+  in which order.
+- World history with timestamps, showing which computer each backup came from
+  and letting any point be restored. Backups made on this computer are labelled
+  "this PC" rather than by hostname.
+- Worlds are added by ticking them off a list of the worlds actually in the
+  saves folder, instead of typing a path. The folder defaults to
+  %APPDATA%\.minecraft\saves on Windows, ~/.minecraft/saves on Linux and
+  ~/Library/Application Support/minecraft/saves on macOS, and can be changed in
+  settings.
+- A world that Minecraft still has open is reported as such before the backup
+  is attempted, using the same session.lock check the backup itself performs.
+- A world that has not been played since its last backup is uploaded without
+  recording a second, identical entry in its history.
+- Settings moved into a dialog reachable from the top bar, alongside the cloud
+  repository the selected world is connected to and whether it can be reached.
+
+Removed
+
+- The dock, the sidebar, the separate worlds page and the separate settings
+  page, along with the Commit, Push, Pull and Restore dialogs they opened.
+  Everything they did is on the dashboard.
+
 ## 0.4.11 (2026-08-22)
 
 Bug fixes
