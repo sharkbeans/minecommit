@@ -1,12 +1,11 @@
-import { useCallback, useState } from "react"
+import { useCallback, useRef, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { openUrl } from "@tauri-apps/plugin-opener"
-import { ExternalLink, LogOut, UserRound } from "lucide-react"
+import { ExternalLink, Loader2, LogOut, UserRound } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
-  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -22,9 +21,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Field, FieldGroup } from "@/components/ui/field"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
 import { useI18n } from "@/contexts/i18n"
 
 /** Lucide dropped its brand icons, and GitHub's mark is the recognisable one. */
@@ -47,9 +43,6 @@ export interface GitHubAccount {
  * Where a MineCommit token comes from. The scope and description are filled in
  * so the player only has to scroll down and press the green button.
  */
-const NEW_TOKEN_URL =
-  "https://github.com/settings/tokens/new?scopes=repo&description=MineCommit"
-
 const SIGN_UP_URL = "https://github.com/signup"
 
 function openExternal(url: string) {
@@ -82,58 +75,50 @@ export function AccountMenu({
     onSignedOut()
   }, [onSignedOut])
 
+  // Signed out there is exactly one thing to do, so it is a button. Putting it
+  // behind a menu that opens to reveal a single item only adds a click and a
+  // place to get stuck.
+  if (!account) {
+    return (
+      <Button variant="outline" size="sm" className="gap-2" onClick={onSignIn}>
+        <GithubMark className="size-4" />
+        {t("gh.signIn")}
+      </Button>
+    )
+  }
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
         render={
           <Button variant="ghost" size="sm" className="gap-2">
-            {account?.avatar_url ? (
-              <img
-                src={account.avatar_url}
-                alt=""
-                className="size-5 rounded-full"
-              />
-            ) : account ? (
-              <UserRound />
+            {account.avatar_url ? (
+              <img src={account.avatar_url} alt="" className="size-5 rounded-full" />
             ) : (
-              <GithubMark className="size-4" />
+              <UserRound />
             )}
-            <span className="max-w-32 truncate">
-              {account ? account.login : t("gh.notSignedIn")}
-            </span>
-            {!account && (
-              <span className="size-1.5 rounded-full bg-amber-500" aria-hidden />
-            )}
+            <span className="max-w-32 truncate">{account.login}</span>
           </Button>
         }
       />
       <DropdownMenuContent align="end" className="w-56">
         <DropdownMenuLabel>{t("gh.account")}</DropdownMenuLabel>
-        {account ? (
-          <DropdownMenuGroup>
-            <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
-              {t("gh.signedInAs", { login: account.login })}
-            </DropdownMenuLabel>
-            <DropdownMenuItem
-              onClick={() => openExternal(`https://github.com/${account.login}`)}
-            >
-              <ExternalLink />
-              {t("gh.openProfile")}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => void signOut()}>
-              <LogOut />
-              {t("gh.signOut")}
-            </DropdownMenuItem>
-          </DropdownMenuGroup>
-        ) : (
-          <DropdownMenuGroup>
-            <DropdownMenuItem onClick={onSignIn}>
-              <GithubMark className="size-4" />
-              {t("gh.signIn")}
-            </DropdownMenuItem>
-          </DropdownMenuGroup>
-        )}
+        <DropdownMenuGroup>
+          <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+            {t("gh.signedInAs", { login: account.login })}
+          </DropdownMenuLabel>
+          <DropdownMenuItem
+            onClick={() => openExternal(`https://github.com/${account.login}`)}
+          >
+            <ExternalLink />
+            {t("gh.openProfile")}
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={() => void signOut()}>
+            <LogOut />
+            {t("gh.signOut")}
+          </DropdownMenuItem>
+        </DropdownMenuGroup>
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -141,12 +126,26 @@ export function AccountMenu({
 
 /* ── Signing in ──────────────────────────────────────────────────────────── */
 
+interface SignInRequest {
+  user_code: string
+  verification_uri: string
+  expires_in_seconds: number
+  retry_in_seconds: number
+}
+
+type SignInProgress =
+  | { status: "waiting"; retry_in_seconds: number }
+  | { status: "authorized"; account: GitHubAccount }
+  | { status: "denied" }
+  | { status: "expired" }
+
 /**
- * Sign-in by access token.
+ * Sign in with GitHub.
  *
- * A token rather than a password means MineCommit never handles the password,
- * the token can be revoked from GitHub alone, and Git can keep it in the
- * platform's credential store to authenticate pushes.
+ * GitHub shows a code, the player types it on github.com, and MineCommit waits.
+ * Nothing is typed into MineCommit, and no password or token passes through it:
+ * GitHub hands back an access token afterwards, which goes straight to Git's
+ * credential store so pushes authenticate on their own.
  */
 export function GitHubSignInDialog({
   open,
@@ -158,74 +157,140 @@ export function GitHubSignInDialog({
   onSignedIn: (account: GitHubAccount) => void
 }) {
   const { t } = useI18n()
-  const [token, setToken] = useState("")
+  const [request, setRequest] = useState<SignInRequest | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const [copied, setCopied] = useState(false)
+  const cancelled = useRef(false)
 
-  const signIn = useCallback(async () => {
-    if (!token.trim() || busy) return
+  const finish = useCallback(() => {
+    cancelled.current = true
+    void invoke("github_cancel_sign_in").catch(() => {})
+    onOpenChange(false)
+  }, [onOpenChange])
+
+  const start = useCallback(async () => {
+    if (busy) return
     setBusy(true)
     setError("")
+    cancelled.current = false
     try {
-      const account = await invoke<GitHubAccount>("github_sign_in", { token: token.trim() })
-      setToken("")
-      onSignedIn(account)
-      onOpenChange(false)
+      const started = await invoke<SignInRequest>("github_start_sign_in")
+      setRequest(started)
+      openExternal(started.verification_uri)
+
+      // Wait for the player to finish on GitHub's page, asking at the pace
+      // GitHub sets. It tells us to slow down if we ask too often.
+      let wait = started.retry_in_seconds
+      const deadline = Date.now() + started.expires_in_seconds * 1000
+      while (!cancelled.current && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, wait * 1000))
+        if (cancelled.current) return
+        const progress = await invoke<SignInProgress>("github_poll_sign_in")
+        if (progress.status === "authorized") {
+          onSignedIn(progress.account)
+          onOpenChange(false)
+          return
+        }
+        if (progress.status === "denied") {
+          setError(t("gh.denied"))
+          setRequest(null)
+          return
+        }
+        if (progress.status === "expired") {
+          setError(t("gh.expired"))
+          setRequest(null)
+          return
+        }
+        wait = progress.retry_in_seconds
+      }
+      if (!cancelled.current) {
+        setError(t("gh.expired"))
+        setRequest(null)
+      }
     } catch (err) {
       setError(errorText(err))
+      setRequest(null)
     } finally {
       setBusy(false)
     }
-  }, [busy, onOpenChange, onSignedIn, token])
+  }, [busy, onOpenChange, onSignedIn, t])
+
+  const copyCode = useCallback(async () => {
+    if (!request) return
+    try {
+      await navigator.clipboard.writeText(request.user_code)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // The code is on screen either way.
+    }
+  }, [request])
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+    <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : finish())}>
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{t("gh.signInTitle")}</DialogTitle>
           <DialogDescription>{t("gh.signInBody")}</DialogDescription>
         </DialogHeader>
 
-        <div className="flex flex-col gap-3">
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-muted-foreground">{t("gh.noAccount")}</span>
-            <Button variant="link" className="h-auto p-0" onClick={() => openExternal(SIGN_UP_URL)}>
-              {t("gh.createAccount")}
+        {request ? (
+          <div className="flex flex-col items-center gap-4 py-2">
+            <p className="text-sm text-muted-foreground">{t("gh.enterCode")}</p>
+            <button
+              type="button"
+              onClick={() => void copyCode()}
+              title={t("gh.copy")}
+              className="rounded-lg border px-6 py-3 font-mono text-2xl tracking-[0.3em] transition-colors hover:bg-muted"
+            >
+              {request.user_code}
+            </button>
+            <span className="text-xs text-muted-foreground">
+              {copied ? t("gh.copied") : t("gh.tapToCopy")}
+            </span>
+
+            <p className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              {t("gh.waiting")}
+            </p>
+
+            <Button variant="link" onClick={() => openExternal(request.verification_uri)}>
+              <ExternalLink data-icon="inline-start" />
+              {t("gh.reopenPage")}
             </Button>
+            <p className="text-center text-xs break-all text-muted-foreground">
+              {request.verification_uri}
+            </p>
           </div>
+        ) : (
+          <div className="flex flex-col gap-3 py-2">
+            <p className="text-sm text-muted-foreground">{t("gh.howItWorks")}</p>
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-muted-foreground">{t("gh.noAccount")}</span>
+              <Button
+                variant="link"
+                className="h-auto p-0"
+                onClick={() => openExternal(SIGN_UP_URL)}
+              >
+                {t("gh.createAccount")}
+              </Button>
+            </div>
+          </div>
+        )}
 
-          <Button variant="outline" onClick={() => openExternal(NEW_TOKEN_URL)}>
-            <GithubMark data-icon="inline-start" className="size-4" />
-            {t("gh.getToken")}
-          </Button>
-          <p className="text-xs text-muted-foreground">{t("gh.getTokenSteps")}</p>
-
-          <FieldGroup>
-            <Field>
-              <Label htmlFor="github-token">{t("gh.tokenLabel")}</Label>
-              <Input
-                id="github-token"
-                type="password"
-                value={token}
-                placeholder="ghp_…"
-                autoComplete="off"
-                onChange={(e) => setToken(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void signIn()
-                }}
-              />
-              <p className="text-xs text-muted-foreground">{t("gh.tokenHelp")}</p>
-            </Field>
-          </FieldGroup>
-
-          {error && <p className="text-sm break-words text-destructive">{error}</p>}
-        </div>
+        {error && <p className="text-sm break-words text-destructive">{error}</p>}
 
         <DialogFooter>
-          <DialogClose render={<Button variant="outline">{t("common.cancel")}</Button>} />
-          <Button onClick={() => void signIn()} disabled={busy || !token.trim()}>
-            {busy ? t("gh.signingIn") : t("gh.signIn")}
+          <Button variant="outline" onClick={finish}>
+            {t("common.cancel")}
           </Button>
+          {!request && (
+            <Button onClick={() => void start()} disabled={busy}>
+              <GithubMark data-icon="inline-start" className="size-4" />
+              {busy ? t("gh.signingIn") : t("gh.signIn")}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

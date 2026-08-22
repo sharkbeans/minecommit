@@ -209,6 +209,9 @@ const en = {
   "worlds.deleteRepository": "Also delete the local Git repository and backups",
   "worlds.delete": "Remove",
 
+  "dash.loading": "Loading your worlds…",
+  "gh.copy": "Copy",
+  "gh.copied": "Copied",
   "dash.worlds": "Worlds",
   "dash.addWorld": "Add world",
   "dash.noWorlds": "No worlds yet",
@@ -315,12 +318,12 @@ const en = {
   "gh.signInBody": "MineCommit keeps your worlds in a private GitHub repository that only you can see. Sign in once and every world can back up to it.",
   "gh.noAccount": "No GitHub account yet?",
   "gh.createAccount": "Create one, it is free",
-  "gh.getToken": "Get a token from GitHub",
-  "gh.getTokenSteps": "The page opens with the right settings already filled in. Scroll to the bottom, press Generate token, then copy it and paste it below.",
-  "gh.tokenLabel": "Paste your token",
-  "gh.tokenHelp": "A token is used instead of your password, so MineCommit never sees your password and you can revoke it from GitHub at any time.",
+  "gh.howItWorks": "GitHub will show you a short code to enter on its website. MineCommit never sees your password.",
+  "gh.enterCode": "Enter this code on the GitHub page that just opened:",
+  "gh.tapToCopy": "Click the code to copy it",
+  "gh.waiting": "Waiting for you to approve it on GitHub…",
   "gh.signingIn": "Signing in…",
-  "gh.signInFailed": "Could not sign in",
+  "gh.reopenPage": "Open the GitHub page again",
   "gh.chooseTitle": "Where should {world} be backed up?",
   "gh.chooseBody": "One repository can hold several worlds, each under its own name.",
   "gh.reuse": "Add it to a repository I already use",
@@ -334,6 +337,8 @@ const en = {
   "gh.create": "Create and connect",
   "gh.signInFirst": "Sign in to GitHub to back this world up.",
   "gh.sessionExpired": "Sign in again to create a repository from here.",
+  "gh.denied": "The sign-in was cancelled on GitHub.",
+  "gh.expired": "That code expired. Start the sign-in again.",
 }
 
 export type TranslationKey = keyof typeof en
@@ -530,6 +535,9 @@ const zhCN: Record<TranslationKey, string> = {
   "worlds.deleteRepository": "同时删除本地 Git 仓库与备份数据",
   "worlds.delete": "删除",
 
+  "dash.loading": "正在加载存档…",
+  "gh.copy": "复制",
+  "gh.copied": "已复制",
   "dash.worlds": "存档",
   "dash.addWorld": "添加存档",
   "dash.noWorlds": "还没有存档",
@@ -636,12 +644,12 @@ const zhCN: Record<TranslationKey, string> = {
   "gh.signInBody": "MineCommit 会把你的存档保存在只有你能看到的私有 GitHub 仓库中。登录一次，所有存档都可以备份到那里。",
   "gh.noAccount": "还没有 GitHub 账号？",
   "gh.createAccount": "免费注册一个",
-  "gh.getToken": "从 GitHub 获取令牌",
-  "gh.getTokenSteps": "打开的页面已经填好了所需设置。滚动到底部，点击 Generate token，然后复制并粘贴到下方。",
-  "gh.tokenLabel": "粘贴你的令牌",
-  "gh.tokenHelp": "使用令牌而不是密码，MineCommit 不会看到你的密码，你也可以随时在 GitHub 上撤销它。",
+  "gh.howItWorks": "GitHub 会显示一个短代码，在它的网站上输入即可。MineCommit 不会看到你的密码。",
+  "gh.enterCode": "在刚打开的 GitHub 页面中输入这个代码：",
+  "gh.tapToCopy": "点击代码即可复制",
+  "gh.waiting": "等待你在 GitHub 上确认…",
   "gh.signingIn": "登录中…",
-  "gh.signInFailed": "登录失败",
+  "gh.reopenPage": "重新打开 GitHub 页面",
   "gh.chooseTitle": "{world} 备份到哪里？",
   "gh.chooseBody": "一个仓库可以存放多个存档，每个存档使用各自的名称。",
   "gh.reuse": "添加到我已经在用的仓库",
@@ -655,6 +663,8 @@ const zhCN: Record<TranslationKey, string> = {
   "gh.create": "创建并连接",
   "gh.signInFirst": "登录 GitHub 后即可备份这个存档。",
   "gh.sessionExpired": "请重新登录后再从这里创建仓库。",
+  "gh.denied": "已在 GitHub 上取消登录。",
+  "gh.expired": "代码已过期，请重新开始登录。",
 }
 
 const translations: Record<Locale, Record<TranslationKey, string>> = {

@@ -168,8 +168,13 @@ jobs:
         with:
           tool: tauri-cli@2
 
+      # The GitHub OAuth client ID is compiled in. It is public by design: the
+      # device flow exists for clients that cannot keep a secret, so this is a
+      # repository variable rather than a secret.
       - name: Build portable Windows executable
         run: bun tauri build --ci --target x86_64-pc-windows-msvc --no-bundle
+        env:
+          MINECOMMIT_GITHUB_CLIENT_ID: ${{ vars.MINECOMMIT_GITHUB_CLIENT_ID }}
 
       - name: Prepare release artifact
         shell: pwsh
@@ -239,6 +244,8 @@ jobs:
 
       - name: Build Debian package and portable Linux archive
         run: bun tauri build --ci --target x86_64-unknown-linux-gnu --bundles deb
+        env:
+          MINECOMMIT_GITHUB_CLIENT_ID: ${{ vars.MINECOMMIT_GITHUB_CLIENT_ID }}
 
       - name: Prepare release artifact
         working-directory: ${{ github.workspace }}

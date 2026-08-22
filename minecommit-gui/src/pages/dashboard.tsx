@@ -16,6 +16,7 @@ import {
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Textarea } from "@/components/ui/textarea"
 import { RollingLogDialog, type Operation } from "@/components/rolling-log"
 import type { LogLine } from "@/components/log-viewer"
@@ -428,6 +429,13 @@ export function DashboardPage() {
             {t("dash.worlds")}
           </p>
           <ul className="min-h-0 flex-1 overflow-y-auto px-2">
+            {!loaded &&
+              [0, 1, 2].map((row) => (
+                <li key={row} className="px-2 py-2">
+                  <Skeleton className="h-4 w-32" />
+                  <Skeleton className="mt-1.5 h-3 w-20" />
+                </li>
+              ))}
             {saves.map((save) => {
               const badge = BADGES[situationOf(
                 statuses[save.name] ?? null,
@@ -462,6 +470,7 @@ export function DashboardPage() {
             <Button
               variant="ghost"
               className="w-full justify-start"
+              disabled={!loaded}
               onClick={() => setAddOpen(true)}
             >
               <Plus data-icon="inline-start" />
@@ -471,7 +480,12 @@ export function DashboardPage() {
         </nav>
 
         <main className="min-w-0 flex-1 overflow-y-auto">
-          {!selectedSave ? (
+          {!loaded ? (
+            <div className="flex h-full flex-col items-center justify-center gap-3">
+              <Loader2 className="size-5 animate-spin text-muted-foreground" />
+              <p className="text-sm text-muted-foreground">{t("dash.loading")}</p>
+            </div>
+          ) : !selectedSave ? (
             <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
               <p className="text-sm text-muted-foreground">
                 {saves.length === 0 ? t("dash.noWorldsHelp") : t("dash.selectWorld")}

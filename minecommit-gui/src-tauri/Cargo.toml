@@ -31,6 +31,7 @@ minecommit = { path = "../../minecommit" }
 # Talking to the GitHub API: validating a sign-in and creating a backup
 # repository. Tauri already pulls reqwest in, but without a TLS backend.
 reqwest = { version = "0.13", default-features = false, features = [
+    "form",
     "json",
     "rustls",
 ] }

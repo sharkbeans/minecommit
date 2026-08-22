@@ -723,6 +723,8 @@ struct AppState {
     /// can be created without asking for it twice. It is never written to
     /// MineCommit's own files; Git's credential store keeps the durable copy.
     github_token: Mutex<Option<String>>,
+    /// A sign-in the player has been shown a code for but not finished.
+    device_flow: Mutex<Option<DeviceFlow>>,
 }
 
 fn saves_file_path(data_dir: &Path) -> PathBuf {
@@ -1593,14 +1595,59 @@ async fn backup_and_upload(
 pub struct GitHubAccount {
     pub login: String,
     pub avatar_url: Option<String>,
-    /// Whether a repository can be created without asking for the token again.
-    /// The token lives in Git's credential store, which MineCommit does not
-    /// read back, so this is true only for the session it was entered in.
+    /// Whether a repository can be created without signing in again. The token
+    /// lives in Git's credential store, which MineCommit does not read back, so
+    /// this is true only for the session it was granted in.
     pub can_create_repository: bool,
 }
 
 /// GitHub asks for this, and refuses requests without one.
 const USER_AGENT: &str = concat!("MineCommit/", env!("CARGO_PKG_VERSION"));
+
+/// The OAuth app MineCommit signs in as.
+///
+/// Public by design: the device flow exists precisely for clients that cannot
+/// keep a secret, which is every app a player downloads. Set at build time with
+/// `MINECOMMIT_GITHUB_CLIENT_ID`.
+const GITHUB_CLIENT_ID: &str = match option_env!("MINECOMMIT_GITHUB_CLIENT_ID") {
+    Some(id) => id,
+    None => "",
+};
+
+/// Enough to push to and create the player's own backup repositories.
+const GITHUB_SCOPE: &str = "repo";
+
+/// What GitHub told us to show the player, and how to wait for them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignInRequest {
+    /// The short code the player types into GitHub.
+    pub user_code: String,
+    /// The page to type it on.
+    pub verification_uri: String,
+    /// How long the code is good for.
+    pub expires_in_seconds: u64,
+    pub retry_in_seconds: u64,
+}
+
+/// Where a sign-in has got to. The player is on GitHub's page while this is
+/// `Waiting`, so each poll is one question and one answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SignInProgress {
+    Waiting { retry_in_seconds: u64 },
+    Authorized { account: GitHubAccount },
+    /// The player pressed Cancel on GitHub's page.
+    Denied,
+    /// The code went stale before it was entered.
+    Expired,
+}
+
+/// A sign-in in progress.
+#[derive(Debug, Clone)]
+struct DeviceFlow {
+    device_code: String,
+    retry_in_seconds: u64,
+}
 
 fn github_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -1609,8 +1656,17 @@ fn github_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("Could not start an HTTPS client: {e}"))
 }
 
-/// Ask GitHub who a token belongs to. Doubles as the check that it is valid
-/// and has not expired.
+fn require_client_id() -> Result<&'static str, String> {
+    if GITHUB_CLIENT_ID.trim().is_empty() {
+        return Err(
+            "This build of MineCommit has no GitHub application configured, so it cannot sign in."
+                .into(),
+        );
+    }
+    Ok(GITHUB_CLIENT_ID)
+}
+
+/// Ask GitHub who a token belongs to. Doubles as the check that it is valid.
 async fn github_user(token: &str) -> Result<(String, Option<String>), String> {
     let response = github_client()?
         .get("https://api.github.com/user")
@@ -1621,7 +1677,7 @@ async fn github_user(token: &str) -> Result<(String, Option<String>), String> {
         .map_err(|e| format!("Could not reach GitHub: {e}"))?;
 
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err("GitHub did not accept that token. Check it was copied in full and has not expired.".into());
+        return Err("GitHub did not accept the sign-in. Try signing in again.".into());
     }
     if !response.status().is_success() {
         return Err(format!("GitHub refused the sign-in ({})", response.status()));
@@ -1634,7 +1690,7 @@ async fn github_user(token: &str) -> Result<(String, Option<String>), String> {
     let login = body
         .get("login")
         .and_then(|v| v.as_str())
-        .ok_or("GitHub did not say which account that token belongs to")?
+        .ok_or("GitHub did not say which account this is")?
         .to_string();
     let avatar = body
         .get("avatar_url")
@@ -1671,7 +1727,7 @@ fn ensure_credential_helper() -> Result<(), String> {
         .args(["config", "--global", "credential.helper", helper])
         .output()
         .map_err(|e| format!("Could not update your Git configuration: {e}"))?;
-    anyhow_ensure_success(set, "Could not tell Git where to keep the sign-in")
+    ensure_command_succeeded(set, "Could not tell Git where to keep the sign-in")
 }
 
 fn libsecret_available() -> bool {
@@ -1687,7 +1743,7 @@ fn libsecret_available() -> bool {
         .exists()
 }
 
-fn anyhow_ensure_success(output: std::process::Output, context: &str) -> Result<(), String> {
+fn ensure_command_succeeded(output: std::process::Output, context: &str) -> Result<(), String> {
     if output.status.success() {
         Ok(())
     } else {
@@ -1699,7 +1755,7 @@ fn anyhow_ensure_success(output: std::process::Output, context: &str) -> Result<
 }
 
 /// Hand the token to Git's credential store so pushes and fetches authenticate
-/// without asking. MineCommit never writes the token to its own files.
+/// without asking. MineCommit never writes it to its own files.
 fn store_git_credential(login: &str, token: &str) -> Result<(), String> {
     ensure_credential_helper()?;
     run_credential("approve", login, Some(token))
@@ -1740,36 +1796,149 @@ fn run_credential(action: &str, login: &str, token: Option<&str>) -> Result<(), 
     let output = child
         .wait_with_output()
         .map_err(|e| format!("Git did not finish: {e}"))?;
-    anyhow_ensure_success(output, "Git could not store the sign-in")
+    ensure_command_succeeded(output, "Git could not store the sign-in")
 }
 
+/// Begin signing in: ask GitHub for a code for the player to enter.
 #[tauri::command]
-async fn github_sign_in(
+async fn github_start_sign_in(
     state: tauri::State<'_, AppState>,
-    token: String,
-) -> Result<GitHubAccount, String> {
-    let token = token.trim().to_string();
-    if token.is_empty() {
-        return Err("Paste the token you copied from GitHub".into());
+) -> Result<SignInRequest, String> {
+    let client_id = require_client_id()?;
+
+    let response = github_client()?
+        .post("https://github.com/login/device/code")
+        .header("Accept", "application/json")
+        .form(&[("client_id", client_id), ("scope", GITHUB_SCOPE)])
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach GitHub: {e}"))?;
+
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    if !status.is_success() {
+        let message = body
+            .get("error_description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("GitHub would not start the sign-in");
+        return Err(format!("{message} ({status})"));
     }
 
-    let (login, avatar_url) = github_user(&token).await?;
-    store_git_credential(&login, &token)?;
+    let text = |key: &str| body.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    let device_code = text("device_code").ok_or("GitHub did not send a sign-in code")?;
+    let user_code = text("user_code").ok_or("GitHub did not send a sign-in code")?;
+    let verification_uri =
+        text("verification_uri").unwrap_or_else(|| "https://github.com/login/device".to_string());
+    // GitHub's documented default is five seconds when it says nothing.
+    let retry_in_seconds = body.get("interval").and_then(|v| v.as_u64()).unwrap_or(5);
+    let expires_in_seconds = body.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(900);
 
-    let mut settings = read_settings(&state.data_dir);
-    settings.github_login = login.clone();
-    settings.github_avatar = avatar_url.clone().unwrap_or_default();
-    write_settings(&state.data_dir, &settings)?;
+    *state.device_flow.lock().unwrap() = Some(DeviceFlow {
+        device_code,
+        retry_in_seconds,
+    });
 
-    // Kept only in memory, and only so "create a repository for me" works
-    // during the sign-in it belongs to.
-    *state.github_token.lock().unwrap() = Some(token);
-
-    Ok(GitHubAccount {
-        login,
-        avatar_url,
-        can_create_repository: true,
+    Ok(SignInRequest {
+        user_code,
+        verification_uri,
+        expires_in_seconds,
+        retry_in_seconds,
     })
+}
+
+/// Ask once whether the player has finished on GitHub's page.
+#[tauri::command]
+async fn github_poll_sign_in(
+    state: tauri::State<'_, AppState>,
+) -> Result<SignInProgress, String> {
+    let client_id = require_client_id()?;
+    let flow = state
+        .device_flow
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("No sign-in is in progress")?;
+
+    let response = github_client()?
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .form(&[
+            ("client_id", client_id),
+            ("device_code", flow.device_code.as_str()),
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:device_code",
+            ),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach GitHub: {e}"))?;
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("GitHub sent something unexpected: {e}"))?;
+
+    if let Some(token) = body.get("access_token").and_then(|v| v.as_str()) {
+        let (login, avatar_url) = github_user(token).await?;
+        store_git_credential(&login, token)?;
+
+        let mut settings = read_settings(&state.data_dir);
+        settings.github_login = login.clone();
+        settings.github_avatar = avatar_url.clone().unwrap_or_default();
+        write_settings(&state.data_dir, &settings)?;
+
+        // Kept in memory only, and only so "create a repository for me" works
+        // during the session it was granted in.
+        *state.github_token.lock().unwrap() = Some(token.to_string());
+        *state.device_flow.lock().unwrap() = None;
+
+        return Ok(SignInProgress::Authorized {
+            account: GitHubAccount {
+                login,
+                avatar_url,
+                can_create_repository: true,
+            },
+        });
+    }
+
+    match body.get("error").and_then(|v| v.as_str()) {
+        Some("authorization_pending") => Ok(SignInProgress::Waiting {
+            retry_in_seconds: flow.retry_in_seconds,
+        }),
+        // GitHub asks us to back off; it expects the extra delay to stick.
+        Some("slow_down") => {
+            let slower = body
+                .get("interval")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(flow.retry_in_seconds + 5);
+            state
+                .device_flow
+                .lock()
+                .unwrap()
+                .as_mut()
+                .map(|flow| flow.retry_in_seconds = slower);
+            Ok(SignInProgress::Waiting {
+                retry_in_seconds: slower,
+            })
+        }
+        Some("expired_token") => {
+            *state.device_flow.lock().unwrap() = None;
+            Ok(SignInProgress::Expired)
+        }
+        Some("access_denied") => {
+            *state.device_flow.lock().unwrap() = None;
+            Ok(SignInProgress::Denied)
+        }
+        Some(other) => Err(format!("GitHub refused the sign-in: {other}")),
+        None => Err("GitHub sent an answer MineCommit did not understand".into()),
+    }
+}
+
+/// Abandon a sign-in the player backed out of.
+#[tauri::command]
+fn github_cancel_sign_in(state: tauri::State<AppState>) {
+    *state.device_flow.lock().unwrap() = None;
 }
 
 #[tauri::command]
@@ -1875,6 +2044,7 @@ pub fn run() {
                 saves: Mutex::new(saves),
                 data_dir,
                 github_token: Mutex::new(None),
+                device_flow: Mutex::new(None),
             });
 
             Ok(())
@@ -1909,7 +2079,9 @@ pub fn run() {
             set_saves_folder,
             backup_and_upload,
             repair_world_repository,
-            github_sign_in,
+            github_start_sign_in,
+            github_poll_sign_in,
+            github_cancel_sign_in,
             github_account,
             github_sign_out,
             create_github_repository,
