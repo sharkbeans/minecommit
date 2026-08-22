@@ -1304,6 +1304,13 @@ fn list_worlds_in_folder(folder: String) -> Result<Vec<FoundWorld>, String> {
         if !level.is_file() {
             continue;
         }
+        // A restore leaves the world it replaced beside the new one, and that
+        // copy holds a level.dat like any other world. Offering it back as
+        // something to track would start a second history for a folder the
+        // player never made and cannot tell apart by name.
+        if is_restore_snapshot(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
         let last_played = fs::metadata(&level)
             .and_then(|meta| meta.modified())
             .ok()
@@ -1316,6 +1323,13 @@ fn list_worlds_in_folder(folder: String) -> Result<Vec<FoundWorld>, String> {
     }
     worlds.sort_by(|a, b| b.last_played.cmp(&a.last_played));
     Ok(worlds)
+}
+
+/// Whether a folder is a copy MineCommit set aside when restoring a world.
+///
+/// `next_snapshot_path` always ends these names with `.snapshot`.
+fn is_restore_snapshot(name: &str) -> bool {
+    name.ends_with(".snapshot")
 }
 
 /// One point in a world's history.
@@ -2256,6 +2270,26 @@ mod tests {
         assert_eq!(worlds.len(), 1);
         assert_eq!(worlds[0].name, "My World");
         assert!(worlds[0].last_played.is_some());
+    }
+
+    #[test]
+    fn the_copies_a_restore_leaves_behind_are_not_offered_as_worlds() {
+        // Restoring renames the old world to "<name>.<millis>.snapshot" and
+        // leaves it in the saves folder. It still holds a level.dat, so without
+        // this it shows up in "Add a world" looking like a world of its own.
+        let saves = tempfile::tempdir().expect("tempdir");
+        for name in ["My World", "My World.1787384127276.snapshot"] {
+            fs::create_dir(saves.path().join(name)).unwrap();
+            fs::write(saves.path().join(name).join("level.dat"), b"nbt").unwrap();
+        }
+
+        let worlds =
+            list_worlds_in_folder(saves.path().to_string_lossy().to_string()).expect("scan");
+
+        assert_eq!(
+            worlds.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(),
+            vec!["My World"]
+        );
     }
 
     #[test]
