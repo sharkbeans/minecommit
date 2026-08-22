@@ -18,6 +18,7 @@ import {
 import { Field, FieldGroup } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
   Select,
   SelectContent,
@@ -25,15 +26,24 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import type { GitHubAccount } from "@/components/github-account"
+import { GithubMark, type GitHubAccount } from "@/components/github-account"
 import { useCommitAuthor } from "@/contexts/commit-author"
 import { localeOptions, useI18n, type Locale } from "@/contexts/i18n"
 import { useSaves, type Save } from "@/contexts/saves"
-import { cloudErrorLabel, relativeTime, type FoundWorld } from "@/lib/cloud"
+import {
+  cloudErrorLabel,
+  relativeTime,
+  type FoundWorld,
+  type GrantedRepository,
+} from "@/lib/cloud"
 import { cn } from "@/lib/utils"
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error)
+}
+
+function openExternal(url: string) {
+  void openUrl(url).catch((error) => console.error("Unable to open browser:", error))
 }
 
 /** Join a folder and a name using whichever separator the folder already uses. */
@@ -49,17 +59,23 @@ type AddTab = "local" | "cloud"
 /**
  * Adding a world never asks for a path. The saves folder is already known, so
  * the choice is a list of the worlds actually sitting in it -- or, for a
- * computer that does not have the world yet, a download from the cloud.
+ * computer that does not have the world yet, a download from GitHub.
  */
 export function AddWorldDialog({
   open,
   onOpenChange,
   savesFolder,
+  account,
+  accountLoaded,
+  onNeedSignIn,
   onAdded,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   savesFolder: string
+  account: GitHubAccount | null
+  accountLoaded: boolean
+  onNeedSignIn: () => void
   onAdded: (name: string) => void
 }) {
   const { t } = useI18n()
@@ -101,6 +117,12 @@ export function AddWorldDialog({
         ) : (
           <AddFromCloud
             savesFolder={savesFolder}
+            account={account}
+            accountLoaded={accountLoaded}
+            onNeedSignIn={() => {
+              onOpenChange(false)
+              onNeedSignIn()
+            }}
             onAdded={(name) => {
               onOpenChange(false)
               onAdded(name)
@@ -127,16 +149,22 @@ function AddFromThisPc({
   const [error, setError] = useState("")
 
   useEffect(() => {
+    // The saves folder is read from disk when the app starts, and this dialog
+    // can be open before that lands. Scanning "" fails, and the failure used to
+    // stay on screen in red long after the real folder arrived and the list
+    // filled in behind it.
+    if (!savesFolder) return
     let ignore = false
     invoke<FoundWorld[]>("list_worlds_in_folder", { folder: savesFolder })
       .then((worlds) => {
-        if (!ignore) setFound(worlds)
+        if (ignore) return
+        setFound(worlds)
+        setError("")
       })
       .catch((err) => {
-        if (!ignore) {
-          setFound([])
-          setError(errorText(err))
-        }
+        if (ignore) return
+        setFound([])
+        setError(errorText(err))
       })
     return () => {
       ignore = true
@@ -187,12 +215,28 @@ function AddFromThisPc({
     }
   }, [adding, available, chosen, onAdded, refreshSaves])
 
+  // Scanning a saves folder reads every world's level.dat, so on a spinning
+  // disk it is slow enough to look broken. Rows of the right shape say what is
+  // coming; a bare spinner says only that something is happening.
   if (found === null) {
     return (
-      <p className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-        <Loader2 className="size-4 animate-spin" />
-        {t("add.scanning")}
-      </p>
+      <>
+        <div className="flex flex-col gap-1 py-2">
+          {[0, 1, 2].map((row) => (
+            <div key={row} className="flex items-center gap-3 px-2 py-2">
+              <Skeleton className="size-4 rounded" />
+              <div className="flex flex-1 flex-col gap-1.5">
+                <Skeleton className="h-3.5 w-40" />
+                <Skeleton className="h-3 w-24" />
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" />
+          {t("add.scanning")}
+        </p>
+      </>
     )
   }
 
@@ -232,6 +276,7 @@ function AddFromThisPc({
       <DialogFooter>
         <DialogClose render={<Button variant="outline">{t("common.cancel")}</Button>} />
         <Button onClick={() => void handleAdd()} disabled={adding || chosen.size === 0}>
+          {adding && <Loader2 data-icon="inline-start" className="animate-spin" />}
           {adding ? t("add.adding") : t("add.add")}
         </Button>
       </DialogFooter>
@@ -239,44 +284,87 @@ function AddFromThisPc({
   )
 }
 
+/**
+ * Bringing a world down from GitHub.
+ *
+ * The player is already signed in and MineCommit already knows which spaces it
+ * may read, so asking for a URL would be asking them to fetch something the app
+ * is holding. Two dropdowns instead: which space, which world. Pasting an
+ * address stays available for the one case the lists cannot cover -- a world
+ * someone else backed up and shared a link to.
+ */
 function AddFromCloud({
   savesFolder,
+  account,
+  accountLoaded,
+  onNeedSignIn,
   onAdded,
 }: {
   savesFolder: string
+  account: GitHubAccount | null
+  accountLoaded: boolean
+  onNeedSignIn: () => void
   onAdded: (name: string) => void
 }) {
   const { t } = useI18n()
   const { refreshSaves } = useSaves()
-  const [address, setAddress] = useState("")
-  const [branches, setBranches] = useState<string[] | null>(null)
-  const [branch, setBranch] = useState("")
-  const [name, setName] = useState("")
+  const [byLink, setByLink] = useState(false)
+  const [repos, setRepos] = useState<GrantedRepository[] | null>(null)
+  const [pickedRepo, setPickedRepo] = useState("")
+  const [link, setLink] = useState("")
+  const [lookedUp, setLookedUp] = useState("")
+  const [worlds, setWorlds] = useState<{ source: string; names: string[] } | null>(null)
+  const [pickedWorld, setPickedWorld] = useState("")
+  const [editedName, setEditedName] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
 
-  const lookUp = useCallback(async () => {
-    if (!address.trim() || busy) return
-    setBusy(true)
-    setError("")
-    setBranches(null)
-    try {
-      const found = await invoke<string[]>("list_remote_branches", {
-        remoteUrl: address.trim(),
+  useEffect(() => {
+    if (!account || byLink) return
+    let ignore = false
+    invoke<GrantedRepository[]>("github_repositories")
+      .then((granted) => {
+        if (!ignore) setRepos(granted)
       })
-      setBranches(found)
-      const first = found[0] ?? ""
-      setBranch(first)
-      if (!name.trim()) setName(first)
-    } catch (err) {
-      setError(cloudErrorLabel(errorText(err), t))
-    } finally {
-      setBusy(false)
+      .catch((err) => {
+        if (!ignore) {
+          setRepos([])
+          setError(cloudErrorLabel(errorText(err), t))
+        }
+      })
+    return () => {
+      ignore = true
     }
-  }, [address, busy, name, t])
+  }, [account, byLink, t])
+
+  // Everything below follows from the chosen address, so it is derived rather
+  // than copied into state: nothing can be left over from an earlier choice.
+  const source = byLink ? lookedUp : pickedRepo || repos?.[0]?.clone_url || ""
+  const names = worlds?.source === source ? worlds.names : null
+  const loadingWorlds = source !== "" && names === null
+  const world = pickedWorld && names?.includes(pickedWorld) ? pickedWorld : (names?.[0] ?? "")
+  const name = editedName ?? world
+
+  useEffect(() => {
+    if (!source) return
+    let ignore = false
+    invoke<string[]>("list_remote_branches", { remoteUrl: source })
+      .then((found) => {
+        if (!ignore) setWorlds({ source, names: found })
+      })
+      .catch((err) => {
+        if (!ignore) {
+          setWorlds({ source, names: [] })
+          setError(cloudErrorLabel(errorText(err), t))
+        }
+      })
+    return () => {
+      ignore = true
+    }
+  }, [source, t])
 
   const download = useCallback(async () => {
-    if (!branch || !name.trim() || busy) return
+    if (!world || !name.trim() || busy) return
     setBusy(true)
     setError("")
     try {
@@ -285,8 +373,8 @@ function AddFromCloud({
         {
           name: name.trim(),
           savePath: joinPath(savesFolder, name.trim()),
-          remoteUrl: address.trim(),
-          branch,
+          remoteUrl: source,
+          branch: world,
         }
       )
       if (!result.success) {
@@ -300,44 +388,146 @@ function AddFromCloud({
     } finally {
       setBusy(false)
     }
-  }, [address, branch, busy, name, onAdded, refreshSaves, savesFolder, t])
+  }, [busy, name, onAdded, refreshSaves, savesFolder, source, t, world])
+
+  if (!byLink && !accountLoaded) {
+    return (
+      <div className="flex flex-col gap-3 py-2">
+        <Skeleton className="h-4 w-56" />
+        <Skeleton className="h-9 w-full" />
+      </div>
+    )
+  }
+
+  // Signed in and nothing granted is otherwise an empty dropdown above a dead
+  // button: the player is told nothing, and the fix lives on a GitHub page
+  // they have no way to reach from here.
+  if (!byLink && repos !== null && repos.length === 0) {
+    return (
+      <>
+        <p className="py-2 text-sm text-muted-foreground">{t("add.cloudNoSpaces")}</p>
+        {error && <p className="text-sm break-words text-destructive">{error}</p>}
+        <DialogFooter className="sm:justify-between">
+          <Button variant="ghost" size="sm" onClick={() => setByLink(true)}>
+            {t("add.haveLink")}
+          </Button>
+          <div className="flex gap-2">
+            <DialogClose render={<Button variant="outline">{t("common.cancel")}</Button>} />
+            <Button
+              onClick={() => {
+                void invoke<string>("github_install_url")
+                  .then(openExternal)
+                  .catch((err) => setError(errorText(err)))
+              }}
+            >
+              <ExternalLink data-icon="inline-start" />
+              {t("gh.chooseRepos")}
+            </Button>
+          </div>
+        </DialogFooter>
+      </>
+    )
+  }
+
+  if (!byLink && !account) {
+    return (
+      <>
+        <p className="py-2 text-sm text-muted-foreground">{t("add.cloudSignIn")}</p>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setByLink(true)}>
+            {t("add.haveLink")}
+          </Button>
+          <Button onClick={onNeedSignIn}>
+            <GithubMark data-icon="inline-start" className="size-4" />
+            {t("gh.signIn")}
+          </Button>
+        </DialogFooter>
+      </>
+    )
+  }
 
   return (
     <>
-      <FieldGroup>
-        <Field>
-          <Label htmlFor="cloud-address">{t("add.cloudAddress")}</Label>
-          <div className="flex gap-2">
-            <Input
-              id="cloud-address"
-              value={address}
-              placeholder="https://github.com/you/my-world.git"
-              onChange={(e) => {
-                setAddress(e.target.value)
-                setBranches(null)
-              }}
-            />
-            <Button
-              variant="outline"
-              onClick={() => void lookUp()}
-              disabled={busy || !address.trim()}
-            >
-              {busy && branches === null ? t("add.cloudLookingUp") : t("add.cloudLookup")}
-            </Button>
-          </div>
-          <p className="text-xs text-muted-foreground">{t("add.cloudAddressHelp")}</p>
-        </Field>
+      <p className="text-sm text-muted-foreground">{t("add.cloudIntro")}</p>
 
-        {branches !== null && (
+      <FieldGroup>
+        {byLink ? (
+          <Field>
+            <Label htmlFor="cloud-link">{t("add.cloudAddress")}</Label>
+            <div className="flex gap-2">
+              <Input
+                id="cloud-link"
+                value={link}
+                placeholder="https://github.com/them/our-world.git"
+                onChange={(event) => setLink(event.target.value)}
+              />
+              <Button
+                variant="outline"
+                onClick={() => setLookedUp(link.trim())}
+                disabled={!link.trim() || link.trim() === lookedUp}
+              >
+                {t("add.cloudLookup")}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">{t("add.cloudAddressHelp")}</p>
+          </Field>
+        ) : repos === null ? (
+          <Field>
+            <Label>{t("add.cloudRepo")}</Label>
+            <Skeleton className="h-9 w-full" />
+          </Field>
+        ) : (
+          <Field>
+            <Label htmlFor="cloud-repo">{t("add.cloudRepo")}</Label>
+            <Select
+              value={source}
+              onValueChange={(value) => {
+                setPickedRepo(value ?? "")
+                setPickedWorld("")
+                setEditedName(null)
+              }}
+            >
+              <SelectTrigger id="cloud-repo" className="w-full">
+                <SelectValue placeholder={t("add.cloudRepo")} />
+              </SelectTrigger>
+              <SelectContent>
+                {repos.map((repo) => (
+                  <SelectItem key={repo.clone_url} value={repo.clone_url}>
+                    {repo.full_name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+        )}
+
+        {loadingWorlds && (
+          <p className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" />
+            {t("add.cloudLoadingWorlds")}
+          </p>
+        )}
+
+        {names !== null && names.length === 0 && (
+          <p className="text-sm text-muted-foreground">{t("add.cloudNoWorlds")}</p>
+        )}
+
+        {names !== null && names.length > 0 && (
           <>
             <Field>
-              <Label htmlFor="cloud-branch">{t("add.cloudBranch")}</Label>
-              <Select value={branch} onValueChange={(value) => setBranch(value ?? "")}>
-                <SelectTrigger id="cloud-branch" className="w-full">
-                  <SelectValue />
+              <Label htmlFor="cloud-world">{t("add.cloudWorld")}</Label>
+              <Select
+                value={world}
+                onValueChange={(value) => {
+                  setPickedWorld(value ?? "")
+                  setEditedName(null)
+                }}
+              >
+                <SelectTrigger id="cloud-world" className="w-full">
+                  <SelectValue placeholder={t("add.cloudWorld")} />
                 </SelectTrigger>
                 <SelectContent>
-                  {branches.map((option) => (
+                  {names.map((option) => (
                     <SelectItem key={option} value={option}>
                       {option}
                     </SelectItem>
@@ -350,241 +540,34 @@ function AddFromCloud({
               <Input
                 id="cloud-name"
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                onChange={(event) => setEditedName(event.target.value)}
               />
-              <p className="text-xs text-muted-foreground">{t("add.downloadHelp")}</p>
+              <p className="text-xs text-muted-foreground">{t("add.cloudNameHelp")}</p>
             </Field>
           </>
         )}
       </FieldGroup>
 
-      {error && <p className="text-sm text-destructive">{error}</p>}
+      {busy && (
+        <p className="text-xs text-muted-foreground">{t("add.downloadingHelp")}</p>
+      )}
+      {error && <p className="text-sm break-words text-destructive">{error}</p>}
 
-      <DialogFooter>
-        <DialogClose render={<Button variant="outline">{t("common.cancel")}</Button>} />
-        <Button
-          onClick={() => void download()}
-          disabled={busy || branches === null || !branch || !name.trim()}
-        >
-          {busy && branches !== null ? t("add.downloading") : t("add.download")}
-        </Button>
+      <DialogFooter className="sm:justify-between">
+        {account && (
+          <Button variant="ghost" size="sm" onClick={() => setByLink((current) => !current)}>
+            {byLink ? t("add.usePicker") : t("add.haveLink")}
+          </Button>
+        )}
+        <div className="flex gap-2">
+          <DialogClose render={<Button variant="outline">{t("common.cancel")}</Button>} />
+          <Button onClick={() => void download()} disabled={busy || !world || !name.trim()}>
+            {busy && <Loader2 data-icon="inline-start" className="animate-spin" />}
+            {busy ? t("add.downloading") : t("add.download")}
+          </Button>
+        </div>
       </DialogFooter>
     </>
-  )
-}
-
-/* ── Connect a world to GitHub ───────────────────────────────────────────── */
-
-interface GrantedRepository {
-  full_name: string
-  clone_url: string
-  private: boolean
-}
-
-/** GitHub allows letters, digits, dot, dash and underscore in a name. */
-function asRepositoryName(world: string) {
-  return world.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "minecraft-world"
-}
-
-function openExternal(url: string) {
-  void openUrl(url).catch((error) => console.error("Unable to open browser:", error))
-}
-
-/**
- * Connecting a world means choosing one of the repositories the player has
- * given MineCommit access to.
- *
- * MineCommit cannot create a repository, and deliberately: doing so would need
- * rights over the whole account, which is exactly the breadth that picking
- * individual repositories avoids. So the player makes one on GitHub and grants
- * this app that one.
- */
-export function ConnectCloudDialog({
-  open,
-  onOpenChange,
-  save,
-  account,
-  onNeedSignIn,
-  onConnected,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  save: Save | null
-  account: GitHubAccount | null
-  onNeedSignIn: () => void
-  onConnected: () => Promise<void> | void
-}) {
-  const { t } = useI18n()
-  const suggested = asRepositoryName(save?.name ?? "")
-  const [repos, setRepos] = useState<GrantedRepository[] | null>(null)
-  const [chosen, setChosen] = useState("")
-  const [branch, setBranch] = useState(suggested)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState("")
-
-  const loadRepos = useCallback(async () => {
-    setError("")
-    try {
-      const granted = await invoke<GrantedRepository[]>("github_repositories")
-      setRepos(granted)
-      setChosen((current) => current || granted[0]?.clone_url || "")
-    } catch (err) {
-      setRepos([])
-      setError(cloudErrorLabel(errorText(err), t))
-    }
-  }, [t])
-
-  useEffect(() => {
-    if (!account) return
-    void (async () => {
-      await loadRepos()
-    })()
-  }, [account, loadRepos])
-
-  const openInstallPage = useCallback(async () => {
-    try {
-      openExternal(await invoke<string>("github_install_url"))
-    } catch (err) {
-      setError(errorText(err))
-    }
-  }, [])
-
-  const connect = useCallback(async () => {
-    if (!save || busy || !chosen) return
-    setBusy(true)
-    setError("")
-    try {
-      await invoke<Save>("configure_save_cloud", {
-        name: save.name,
-        remoteUrl: chosen,
-        branch: branch.trim(),
-      })
-      await onConnected()
-      onOpenChange(false)
-    } catch (err) {
-      setError(cloudErrorLabel(errorText(err), t))
-    } finally {
-      setBusy(false)
-    }
-  }, [branch, busy, chosen, onConnected, onOpenChange, save, t])
-
-  if (!account) {
-    return (
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>{t("connect.title")}</DialogTitle>
-            <DialogDescription>{t("connect.body")}</DialogDescription>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground">{t("gh.signInFirst")}</p>
-          <DialogFooter>
-            <DialogClose render={<Button variant="outline">{t("common.cancel")}</Button>} />
-            <Button
-              onClick={() => {
-                onOpenChange(false)
-                onNeedSignIn()
-              }}
-            >
-              {t("gh.signIn")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    )
-  }
-
-  const nothingGranted = repos !== null && repos.length === 0
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{t("gh.chooseTitle", { world: save?.name ?? "" })}</DialogTitle>
-          <DialogDescription>{t("gh.chooseBody")}</DialogDescription>
-        </DialogHeader>
-
-        {repos === null ? (
-          <p className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" />
-            {t("gh.loadingRepos")}
-          </p>
-        ) : nothingGranted ? (
-          <div className="flex flex-col items-start gap-2 py-2">
-            <p className="text-sm text-muted-foreground">{t("gh.noRepos")}</p>
-            <Button
-              variant="outline"
-              className="w-full justify-start"
-              onClick={() =>
-                openExternal(
-                  `https://github.com/new?name=${encodeURIComponent(suggested)}&visibility=private`
-                )
-              }
-            >
-              <ExternalLink data-icon="inline-start" />
-              {t("gh.createOnGitHub")}
-            </Button>
-            <Button
-              variant="outline"
-              className="w-full justify-start"
-              onClick={() => void openInstallPage()}
-            >
-              <ExternalLink data-icon="inline-start" />
-              {t("gh.chooseRepos")}
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => void loadRepos()}>
-              {t("gh.refreshRepos")}
-            </Button>
-          </div>
-        ) : (
-          <FieldGroup>
-            <Field>
-              <Label htmlFor="connect-repo">{t("gh.pickRepo")}</Label>
-              <Select value={chosen} onValueChange={(value) => setChosen(value ?? "")}>
-                <SelectTrigger id="connect-repo" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {repos.map((repo) => (
-                    <SelectItem key={repo.clone_url} value={repo.clone_url}>
-                      {repo.full_name}
-                      {repo.private ? ` · ${t("gh.private")}` : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">{t("gh.pickRepoHelp")}</p>
-            </Field>
-            <Field>
-              <Label htmlFor="connect-branch">{t("connect.branch")}</Label>
-              <Input
-                id="connect-branch"
-                value={branch}
-                onChange={(e) => setBranch(e.target.value)}
-              />
-              <p className="text-xs text-muted-foreground">{t("connect.branchHelp")}</p>
-            </Field>
-            <Button
-              variant="link"
-              className="h-auto justify-start p-0"
-              onClick={() => void openInstallPage()}
-            >
-              {t("gh.addAnother")}
-            </Button>
-          </FieldGroup>
-        )}
-
-        {error && <p className="text-sm break-words text-destructive">{error}</p>}
-
-        <DialogFooter>
-          <DialogClose render={<Button variant="outline">{t("common.cancel")}</Button>} />
-          {!nothingGranted && (
-            <Button onClick={() => void connect()} disabled={busy || !chosen || !branch.trim()}>
-              {busy ? t("connect.connecting") : t("connect.connect")}
-            </Button>
-          )}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   )
 }
 
@@ -614,6 +597,7 @@ export function RestorePointDialog({
         <DialogFooter>
           <DialogClose render={<Button variant="outline">{t("common.cancel")}</Button>} />
           <Button onClick={onConfirm} disabled={busy}>
+            {busy && <Loader2 data-icon="inline-start" className="animate-spin" />}
             {busy ? t("restoreTo.working") : t("restoreTo.action")}
           </Button>
         </DialogFooter>
@@ -673,7 +657,8 @@ export function RemoveWorldDialog({
         <DialogFooter>
           <DialogClose render={<Button variant="outline">{t("common.cancel")}</Button>} />
           <Button variant="destructive" onClick={() => void remove()} disabled={busy}>
-            {t("removeWorld.action")}
+            {busy && <Loader2 data-icon="inline-start" className="animate-spin" />}
+            {busy ? t("removeWorld.removing") : t("removeWorld.action")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -727,11 +712,21 @@ export function SettingsDialog({
           <Field>
             <Label htmlFor="settings-folder">{t("dash.savesFolder")}</Label>
             <div className="flex gap-2">
-              <Input id="settings-folder" value={savesFolder} readOnly className="font-mono text-xs" />
+              {savesFolder ? (
+                <Input
+                  id="settings-folder"
+                  value={savesFolder}
+                  readOnly
+                  className="font-mono text-xs"
+                />
+              ) : (
+                <Skeleton className="h-9 flex-1" />
+              )}
               <Button variant="outline" onClick={() => void pickFolder()}>
                 {t("dash.change")}
               </Button>
             </div>
+            <p className="text-xs text-muted-foreground">{t("dash.savesFolderHelp")}</p>
           </Field>
           <Field>
             <Label htmlFor="settings-language">{t("settings.language")}</Label>
@@ -770,6 +765,7 @@ export function SettingsDialog({
               placeholder={t("settings.emailPlaceholder")}
               onChange={(e) => setEmail(e.target.value)}
             />
+            <p className="text-xs text-muted-foreground">{t("settings.identityHelp")}</p>
           </Field>
         </FieldGroup>
         <DialogFooter>

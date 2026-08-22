@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
+import { openUrl } from "@tauri-apps/plugin-opener"
 import {
   AlertTriangle,
   Check,
   CloudDownload,
   CloudOff,
   Folder,
+  HelpCircle,
   Loader2,
   Lock,
   Plus,
@@ -22,11 +24,13 @@ import { RollingLogDialog, type Operation } from "@/components/rolling-log"
 import type { LogLine } from "@/components/log-viewer"
 import {
   AddWorldDialog,
-  ConnectCloudDialog,
   RemoveWorldDialog,
   RestorePointDialog,
   SettingsDialog,
 } from "@/components/world-dialogs"
+import { CloudSetupDialog } from "@/components/cloud-setup"
+import { GuideDialog } from "@/components/guide"
+import { Welcome } from "@/components/welcome"
 import {
   AccountMenu,
   GitHubSignInDialog,
@@ -67,6 +71,20 @@ function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * The tail of a saves folder path.
+ *
+ * A Prism or MultiMC install nests saves five directories deep, and the full
+ * path crowds out everything else in the header while telling the player
+ * nothing they did not already know. The last two parts are enough to
+ * recognise which install this is; the rest is on the tooltip.
+ */
+function shortFolder(path: string) {
+  const parts = path.split(/[\\/]+/).filter(Boolean)
+  if (parts.length <= 2) return path
+  return `…${path.includes("\\") ? "\\" : "/"}${parts.slice(-2).join(path.includes("\\") ? "\\" : "/")}`
+}
+
 /* ── Badges ──────────────────────────────────────────────────────────────── */
 
 const BADGES: Record<Situation, { key: TranslationKey; className: string } | null> = {
@@ -90,6 +108,7 @@ export function DashboardPage() {
   const [savesFolder, setSavesFolder] = useState("")
   const [thisDevice, setThisDevice] = useState("")
   const [account, setAccount] = useState<GitHubAccount | null>(null)
+  const [accountLoaded, setAccountLoaded] = useState(false)
   const [statuses, setStatuses] = useState<Record<string, CloudStatus | null>>({})
   const [worldStates, setWorldStates] = useState<Record<string, WorldState>>({})
   const [historyByWorld, setHistoryByWorld] = useState<Record<string, HistoryEntry[]>>({})
@@ -110,6 +129,7 @@ export function DashboardPage() {
   const [restorePoint, setRestorePoint] = useState<HistoryEntry | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [signInOpen, setSignInOpen] = useState(false)
+  const [guideOpen, setGuideOpen] = useState(false)
 
   /* Saves folder ------------------------------------------------------- */
 
@@ -123,6 +143,7 @@ export function DashboardPage() {
     invoke<GitHubAccount | null>("github_account")
       .then(setAccount)
       .catch(() => setAccount(null))
+      .finally(() => setAccountLoaded(true))
   }, [])
 
   const changeSavesFolder = useCallback((folder: string) => {
@@ -274,6 +295,16 @@ export function DashboardPage() {
 
   /* Actions ------------------------------------------------------------ */
 
+  // Which repositories MineCommit may touch is decided on GitHub, and a player
+  // who granted the wrong one has nowhere else to go and change it.
+  const openInstallPage = useCallback(async () => {
+    try {
+      await openUrl(await invoke<string>("github_install_url"))
+    } catch (err) {
+      console.error("Unable to open GitHub:", err)
+    }
+  }, [])
+
   const backUp = useCallback(async () => {
     if (!selectedSave || busy) return
     // The only case worth skipping is a backup that is already recorded and
@@ -387,19 +418,23 @@ export function DashboardPage() {
   return (
     <div className="flex h-svh w-full flex-col">
       <header className="flex shrink-0 items-center gap-3 border-b px-4 py-2">
-        <button
-          type="button"
-          onClick={() => setSettingsOpen(true)}
-          className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
-          title={savesFolder}
-        >
-          <Folder className="size-3.5 shrink-0" />
-          <span className="truncate font-mono">{savesFolder || "…"}</span>
-        </button>
+        {savesFolder ? (
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+            title={savesFolder}
+          >
+            <Folder className="size-3.5 shrink-0" />
+            <span className="truncate font-mono">{shortFolder(savesFolder)}</span>
+          </button>
+        ) : (
+          <Skeleton className="h-6 w-56 rounded-md" />
+        )}
         <div className="ml-auto flex items-center gap-3">
           {selectedSave && hasCloud && (
             <span
-              className="flex items-center gap-1.5 text-xs text-muted-foreground"
+              className="flex max-w-48 items-center gap-1.5 text-xs whitespace-nowrap text-muted-foreground"
               title={status?.remote_url ?? selectedSave.remote_repo_path}
             >
               <span
@@ -408,15 +443,33 @@ export function DashboardPage() {
                   statusError ? "bg-destructive" : "bg-emerald-500"
                 )}
               />
-              {repoLabel(status?.remote_url ?? selectedSave.remote_repo_path)}
+              <span className="truncate">
+                {repoLabel(status?.remote_url ?? selectedSave.remote_repo_path)}
+              </span>
             </span>
           )}
           <AccountMenu
             account={account}
+            loaded={accountLoaded}
             onSignIn={() => setSignInOpen(true)}
             onSignedOut={() => setAccount(null)}
+            onChooseRepositories={() => void openInstallPage()}
           />
-          <Button variant="ghost" size="icon-sm" onClick={() => setSettingsOpen(true)}>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            title={t("dash.help")}
+            onClick={() => setGuideOpen(true)}
+          >
+            <HelpCircle />
+            <span className="sr-only">{t("dash.help")}</span>
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            title={t("dash.settings")}
+            onClick={() => setSettingsOpen(true)}
+          >
             <Settings2 />
             <span className="sr-only">{t("dash.settings")}</span>
           </Button>
@@ -437,11 +490,12 @@ export function DashboardPage() {
                 </li>
               ))}
             {saves.map((save) => {
-              const badge = BADGES[situationOf(
+              const worldSituation = situationOf(
                 statuses[save.name] ?? null,
                 worldStates[save.name] ?? null,
                 Boolean(statuses[save.name]?.remote_url || save.remote_repo_path)
-              )]
+              )
+              const badge = BADGES[worldSituation]
               return (
                 <li key={save.name}>
                   <button
@@ -453,10 +507,18 @@ export function DashboardPage() {
                     )}
                   >
                     <span className="block truncate text-sm">{save.name}</span>
-                    {badge && (
+                    {badge ? (
                       <span className={cn("block truncate text-xs", badge.className)}>
                         {t(badge.key)}
                       </span>
+                    ) : (
+                      // Every other row carries a second line. Leaving this one
+                      // blank while the status loads makes the whole list jump
+                      // as each world reports in.
+                      <Skeleton
+                        className="mt-1 h-3 w-16 rounded"
+                        title={t("badge.checking")}
+                      />
                     )}
                   </button>
                 </li>
@@ -485,30 +547,34 @@ export function DashboardPage() {
               <Loader2 className="size-5 animate-spin text-muted-foreground" />
               <p className="text-sm text-muted-foreground">{t("dash.loading")}</p>
             </div>
+          ) : saves.length === 0 ? (
+            <Welcome
+              onAddWorld={() => setAddOpen(true)}
+              onOpenGuide={() => setGuideOpen(true)}
+            />
           ) : !selectedSave ? (
             <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
-              <p className="text-sm text-muted-foreground">
-                {saves.length === 0 ? t("dash.noWorldsHelp") : t("dash.selectWorld")}
-              </p>
-              {saves.length === 0 && (
-                <Button onClick={() => setAddOpen(true)}>
-                  <Plus data-icon="inline-start" />
-                  {t("dash.addWorld")}
-                </Button>
-              )}
+              <p className="text-sm text-muted-foreground">{t("dash.selectWorld")}</p>
             </div>
           ) : (
             <div className="mx-auto flex max-w-2xl flex-col gap-6 p-6">
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
                   <h1 className="truncate text-xl font-semibold">{selectedSave.name}</h1>
-                  <p className="text-sm text-muted-foreground">
-                    {status?.local_timestamp
-                      ? t("dash.lastBackedUp", {
-                          when: relativeTime(status.local_timestamp, locale),
-                        })
-                      : t("dash.neverBackedUp")}
-                  </p>
+                  {status === null && !statusError ? (
+                    // "Never backed up" is the wrong thing to say to someone
+                    // whose world is backed up; it is only true once the
+                    // repository has actually answered.
+                    <Skeleton className="mt-1.5 h-4 w-40 rounded" />
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      {status?.local_timestamp
+                        ? t("dash.lastBackedUp", {
+                            when: relativeTime(status.local_timestamp, locale),
+                          })
+                        : t("dash.neverBackedUp")}
+                    </p>
+                  )}
                 </div>
                 <Button variant="ghost" size="sm" onClick={() => setRemoveOpen(true)}>
                   {t("dash.remove")}
@@ -536,7 +602,17 @@ export function DashboardPage() {
                   {t("dash.history")}
                 </h2>
                 {history === null ? (
-                  <p className="py-3 text-sm text-muted-foreground">{t("dash.checking")}</p>
+                  <ul className="flex flex-col divide-y">
+                    {[0, 1, 2].map((row) => (
+                      <li key={row} className="flex items-center gap-3 py-2.5">
+                        <Skeleton className="size-2 shrink-0 rounded-full" />
+                        <span className="flex min-w-0 flex-1 flex-col gap-1.5">
+                          <Skeleton className="h-3.5 w-32 rounded" />
+                          <Skeleton className="h-3 w-20 rounded" />
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
                 ) : history.length === 0 ? (
                   <p className="py-3 text-sm text-muted-foreground">{t("dash.noHistory")}</p>
                 ) : (
@@ -571,7 +647,7 @@ export function DashboardPage() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+                          className="text-muted-foreground hover:text-foreground"
                           onClick={() => setRestorePoint(entry)}
                           disabled={busy !== null}
                         >
@@ -593,6 +669,9 @@ export function DashboardPage() {
         open={addOpen}
         onOpenChange={setAddOpen}
         savesFolder={savesFolder}
+        account={account}
+        accountLoaded={accountLoaded}
+        onNeedSignIn={() => setSignInOpen(true)}
         onAdded={(name) => {
           // The freshly added world is the one the player came here to see.
           void (async () => {
@@ -606,7 +685,7 @@ export function DashboardPage() {
           })()
         }}
       />
-      <ConnectCloudDialog
+      <CloudSetupDialog
         key={`connectOpen-${connectOpen}`}
         open={connectOpen}
         onOpenChange={setConnectOpen}
@@ -655,6 +734,11 @@ export function DashboardPage() {
           if (selectedSave && !selectedSave.remote_repo_path) setConnectOpen(true)
         }}
       />
+      <GuideDialog
+        key={`guideOpen-${guideOpen}`}
+        open={guideOpen}
+        onOpenChange={setGuideOpen}
+      />
       <RollingLogDialog
         open={logOpen}
         onOpenChange={setLogOpen}
@@ -662,6 +746,76 @@ export function DashboardPage() {
         logs={logs}
         finished={logFinished}
       />
+    </div>
+  )
+}
+
+/* ── While something is running ──────────────────────────────────────────── */
+
+/** After this long, silence starts to look like a hang rather than work. */
+const SLOW_AFTER_SECONDS = 20
+
+function clock(seconds: number) {
+  if (seconds < 60) return `${seconds}s`
+  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`
+}
+
+/**
+ * A first backup of a large world reads and hashes every region file, which can
+ * run for minutes with nothing to show for it. A spinner alone is the same
+ * picture as a frozen app, so this counts out loud: the clock keeps moving even
+ * when the log line does not, and past twenty seconds it says outright that
+ * waiting is the expected outcome.
+ */
+function WorkingCard({
+  busy,
+  latestLog,
+  onShowLog,
+}: {
+  busy: Exclude<Busy, null>
+  latestLog: string
+  onShowLog: () => void
+}) {
+  const { t } = useI18n()
+  const [seconds, setSeconds] = useState(0)
+
+  useEffect(() => {
+    const started = Date.now()
+    const timer = setInterval(
+      () => setSeconds(Math.floor((Date.now() - started) / 1000)),
+      1000
+    )
+    return () => clearInterval(timer)
+  }, [])
+
+  return (
+    <div className="flex flex-col items-center gap-3 rounded-xl border p-8 text-center">
+      <Loader2 className="size-6 animate-spin text-muted-foreground" />
+      <div className="flex flex-col gap-1">
+        <p className="text-sm font-medium">
+          {busy === "backup"
+            ? t("state.backingUp")
+            : busy === "latest"
+              ? t("state.gettingLatest")
+              : t("restoreTo.working")}
+        </p>
+        <p className="font-mono text-xs text-muted-foreground">
+          {t("state.elapsed", { time: clock(seconds) })}
+        </p>
+      </div>
+      {latestLog && (
+        <p className="max-w-full truncate font-mono text-xs text-muted-foreground">
+          {latestLog}
+        </p>
+      )}
+      {seconds >= SLOW_AFTER_SECONDS && busy === "backup" && (
+        <p className="max-w-sm text-xs text-balance text-muted-foreground">
+          {t("state.backingUpSlow")}
+        </p>
+      )}
+      <Button variant="ghost" size="sm" onClick={onShowLog}>
+        {t("dash.showLog")}
+      </Button>
     </div>
   )
 }
@@ -728,26 +882,7 @@ function ActionCard({
               : Upload
 
   if (busy !== null) {
-    return (
-      <div className="flex flex-col items-center gap-3 rounded-xl border p-8 text-center">
-        <Loader2 className="size-6 animate-spin text-muted-foreground" />
-        <p className="text-sm font-medium">
-          {busy === "backup"
-            ? t("state.backingUp")
-            : busy === "latest"
-              ? t("state.gettingLatest")
-              : t("restoreTo.working")}
-        </p>
-        {latestLog && (
-          <p className="max-w-full truncate font-mono text-xs text-muted-foreground">
-            {latestLog}
-          </p>
-        )}
-        <Button variant="ghost" size="sm" onClick={onShowLog}>
-          {t("dash.showLog")}
-        </Button>
-      </div>
-    )
+    return <WorkingCard key={busy} busy={busy} latestLog={latestLog} onShowLog={onShowLog} />
   }
 
   if (outcome) {
@@ -839,14 +974,8 @@ function ActionCard({
 
       {canBackUp && (
         <>
-          <Button
-            size="lg"
-            variant={situation === "up_to_date" ? "outline" : "default"}
-            onClick={onBackUp}
-          >
-            <Upload data-icon="inline-start" />
-            {t("state.backUpNow")}
-          </Button>
+          {/* Above the button, because a note offered afterwards is a note
+              nobody writes: the button has already been pressed. */}
           <Textarea
             rows={2}
             value={note}
@@ -855,6 +984,14 @@ function ActionCard({
             className="max-w-sm resize-none text-sm"
             onChange={(e) => setNote(e.target.value)}
           />
+          <Button
+            size="lg"
+            variant={situation === "up_to_date" ? "outline" : "default"}
+            onClick={onBackUp}
+          >
+            <Upload data-icon="inline-start" />
+            {t("state.backUpNow")}
+          </Button>
         </>
       )}
 

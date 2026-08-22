@@ -28,6 +28,23 @@ export interface HistoryEntry {
   note: string
 }
 
+/** A repository the player has given MineCommit access to. */
+export interface GrantedRepository {
+  full_name: string
+  clone_url: string
+  private: boolean
+}
+
+/** GitHub allows letters, digits, dot, dash and underscore in a name. */
+export function asRepositoryName(world: string) {
+  return (
+    world
+      .trim()
+      .replace(/[^A-Za-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "minecraft-world"
+  )
+}
+
 export interface FoundWorld {
   name: string
   path: string
