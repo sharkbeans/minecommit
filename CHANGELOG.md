@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.8.0 (2026-08-22)
+
+Breaking change
+
+- Sign in through a GitHub App that reaches only the repositories you choose,
+  rather than an OAuth app asking for every repository you own. The old
+  consent screen asked for access to all public and private repositories,
+  which is an alarming thing for a Minecraft backup tool to want and far more
+  than it needs. MineCommit now sees the repositories you tick when installing
+  it, and within those only their contents. Signing in again is required.
+- MineCommit no longer creates a repository for you. Doing that needs rights
+  over the whole account, which is the breadth this change exists to remove.
+  Connecting a world instead offers a link to create one on GitHub and a link
+  to choose which repositories MineCommit may use, then lists what you granted.
+
+New features
+
+- Connect a world by picking from the repositories you have granted, instead
+  of pasting an address. The list is exactly what MineCommit can reach, so
+  there is nothing to copy and nothing to get wrong.
+
+Internal
+
+- The GitHub App's client ID and slug are compiled in from
+  MINECOMMIT_GITHUB_CLIENT_ID and MINECOMMIT_GITHUB_APP_SLUG. Both are public;
+  a build missing either refuses to sign in and says so.
+- Read the access token back from Git's credential store when it is needed, so
+  the repository list still works after a restart.
+
 ## 0.7.0 (2026-08-22)
 
 Breaking change
