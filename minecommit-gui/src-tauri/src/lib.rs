@@ -1,9 +1,9 @@
-use chrono::Local;
+use chrono::{DateTime, Local};
 use log::{LevelFilter, Log, Metadata, Record};
 use minecommit::{
     sync::{
-        backup_message_with_device, lock_inactive_world, restore_commit, RemoteStatus, RemoteSync,
-        DEFAULT_BRANCH,
+        backup_message_with_device, current_device_name, lock_inactive_world, restore_commit,
+        RemoteStatus, RemoteSync, DEFAULT_BRANCH,
     },
     utils::cmd::{git_cmd, git_command, git_count_objects, git_repack},
     Config,
@@ -125,6 +125,180 @@ pub struct PerformCommitResult {
     pub size_change_pct: Option<f64>,
 }
 
+/// The blocking half of a backup: lock the world, flatten it into the bare
+/// repository and commit. Shared by [`perform_commit`] and
+/// [`backup_and_upload`] so the two cannot drift apart.
+#[allow(clippy::too_many_arguments)]
+fn commit_blocking(
+    save_dir: String,
+    git_dir: String,
+    branch: String,
+    message: String,
+    author_name: String,
+    author_email: String,
+    extra_patterns: Vec<String>,
+    ignore_patterns: Vec<String>,
+    use_repack: bool,
+) -> PerformCommitResult {
+    let git_dir_path = PathBuf::from(&git_dir);
+    let save_dir_path = PathBuf::from(&save_dir);
+
+    // A held session.lock means Minecraft may still be writing the world.
+    // Keep the lock for the whole flatten/commit operation.
+    let _world_lock = match lock_inactive_world(&save_dir_path) {
+        Ok(lock) => lock,
+        Err(e) => {
+            let msg = format!("{e:#}");
+            log::error!("{msg}");
+            return PerformCommitResult {
+                success: false,
+                logs: vec![],
+                error: Some(msg),
+                size_before_mib: None,
+                size_after_mib: None,
+                size_change_pct: None,
+            };
+        }
+    };
+
+    // 1. Resolve parents
+    let parents = {
+        match git_cmd(&git_dir_path, ["rev-parse", &format!("{branch}^{{commit}}")]).output() {
+            Ok(out) if out.status.success() => {
+                let hash = String::from_utf8(out.stdout).unwrap_or_default().trim().to_owned();
+                log::info!("Branch '{branch}' exists at {hash}, creating child commit");
+                vec![hash]
+            }
+            _ => {
+                log::info!("Branch '{branch}' has no commits yet, creating initial commit");
+                vec![]
+            }
+        }
+    };
+    let r#ref = format!("refs/heads/{}", &branch);
+
+    // 2. Count objects before
+    let size_before = match git_count_objects(&git_dir_path) {
+        Ok(s) => {
+            let v = s.total_size_mib();
+            log::info!("Repo size before: {v:.3} MiB");
+            v
+        }
+        Err(e) => {
+            log::warn!("Failed to count git objects: {e}");
+            f64::NAN
+        }
+    };
+
+    // 3. Run the commit
+    let a_name: Option<&str> = if author_name.is_empty() { None } else { Some(&author_name) };
+    let a_email: Option<&str> = if author_email.is_empty() { None } else { Some(&author_email) };
+    let unprocessed = match Config::new(
+        save_dir_path.clone(),
+        git_dir_path.clone(),
+        extra_patterns,
+        ignore_patterns,
+    )
+    .commit(
+        parents,
+        &backup_message_with_device(&message),
+        Some(r#ref),
+        a_name,
+        a_email,
+    ) {
+        Ok(u) => u,
+        Err(e) => {
+            let msg = format!("{e:#}");
+            log::error!("{msg}");
+            return PerformCommitResult {
+                success: false,
+                logs: vec![],
+                error: Some(msg),
+                size_before_mib: Some(size_before),
+                size_after_mib: None,
+                size_change_pct: None,
+            };
+        }
+    };
+
+    // 4. Check for unprocessed files
+    if !unprocessed.is_empty() {
+        for item in &unprocessed {
+            log::error!("Skipped file: {item}");
+        }
+        let msg = format!(
+            "Skipped {} files because they are not caught by any handler. Catch them via -p or ignore them via -i.",
+            unprocessed.len()
+        );
+        log::error!("{msg}");
+        return PerformCommitResult {
+            success: false,
+            logs: vec![],
+            error: Some(msg),
+            size_before_mib: Some(size_before),
+            size_after_mib: None,
+            size_change_pct: None,
+        };
+    }
+
+    // 5. Optional repack
+    if use_repack {
+        if let Err(e) = git_repack(&git_dir_path) {
+            log::warn!("Repack failed: {e}");
+        }
+    } else {
+        log::warn!("--repack is not enabled, Git repository can get bloated");
+    }
+
+    // 6. Count objects after
+    let size_after = match git_count_objects(&git_dir_path) {
+        Ok(s) => {
+            let v = s.total_size_mib();
+            log::info!("Repo size after: {v:.3} MiB");
+            v
+        }
+        Err(e) => {
+            log::warn!("Failed to count git objects: {e}");
+            f64::NAN
+        }
+    };
+
+    let size_change_pct = if size_before.is_finite() && size_before > 0.0 {
+        Some((size_after - size_before) / size_before * 100.0)
+    } else {
+        None
+    };
+
+    if let Some(pct) = size_change_pct {
+        log::info!(
+            "Done. Total size: {size_after:.3} MiB ({pct:+.4}% from {size_before:.3} MiB)"
+        );
+    } else {
+        log::info!("Done. Total size: {size_after:.3} MiB");
+    }
+
+    // 7. Persist author info to git global config
+    if !author_name.is_empty() {
+        let _ = git_command()
+            .args(["config", "--global", "user.name", &author_name])
+            .output();
+    }
+    if !author_email.is_empty() {
+        let _ = git_command()
+            .args(["config", "--global", "user.email", &author_email])
+            .output();
+    }
+
+    PerformCommitResult {
+        success: true,
+        logs: vec![],
+        error: None,
+        size_before_mib: Some(size_before),
+        size_after_mib: Some(size_after),
+        size_change_pct,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn perform_commit(
@@ -164,163 +338,17 @@ async fn perform_commit(
 
     // Run the heavy commit work on another blocking thread, streaming logs in real time
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let git_dir_path = PathBuf::from(&git_dir);
-        let save_dir_path = PathBuf::from(&save_dir);
-
-        // A held session.lock means Minecraft may still be writing the world.
-        // Keep the lock for the whole flatten/commit operation.
-        let _world_lock = match lock_inactive_world(&save_dir_path) {
-            Ok(lock) => lock,
-            Err(e) => {
-                let msg = format!("{e:#}");
-                log::error!("{msg}");
-                return PerformCommitResult {
-                    success: false,
-                    logs: vec![],
-                    error: Some(msg),
-                    size_before_mib: None,
-                    size_after_mib: None,
-                    size_change_pct: None,
-                };
-            }
-        };
-
-        // 1. Resolve parents
-        let parents = {
-            match git_cmd(&git_dir_path, ["rev-parse", &format!("{branch}^{{commit}}")]).output() {
-                Ok(out) if out.status.success() => {
-                    let hash = String::from_utf8(out.stdout).unwrap_or_default().trim().to_owned();
-                    log::info!("Branch '{branch}' exists at {hash}, creating child commit");
-                    vec![hash]
-                }
-                _ => {
-                    log::info!("Branch '{branch}' has no commits yet, creating initial commit");
-                    vec![]
-                }
-            }
-        };
-        let r#ref = format!("refs/heads/{}", &branch);
-
-        // 2. Count objects before
-        let size_before = match git_count_objects(&git_dir_path) {
-            Ok(s) => {
-                let v = s.total_size_mib();
-                log::info!("Repo size before: {v:.3} MiB");
-                v
-            }
-            Err(e) => {
-                log::warn!("Failed to count git objects: {e}");
-                f64::NAN
-            }
-        };
-
-        // 3. Run the commit
-        let a_name: Option<&str> = if author_name.is_empty() { None } else { Some(&author_name) };
-        let a_email: Option<&str> = if author_email.is_empty() { None } else { Some(&author_email) };
-        let unprocessed = match Config::new(
-            save_dir_path.clone(),
-            git_dir_path.clone(),
+        commit_blocking(
+            save_dir,
+            git_dir,
+            branch,
+            message,
+            author_name,
+            author_email,
             extra_patterns,
             ignore_patterns,
+            use_repack,
         )
-        .commit(
-            parents,
-            &backup_message_with_device(&message),
-            Some(r#ref),
-            a_name,
-            a_email,
-        ) {
-            Ok(u) => u,
-            Err(e) => {
-                let msg = format!("{e:#}");
-                log::error!("{msg}");
-                return PerformCommitResult {
-                    success: false,
-                    logs: vec![],
-                    error: Some(msg),
-                    size_before_mib: Some(size_before),
-                    size_after_mib: None,
-                    size_change_pct: None,
-                };
-            }
-        };
-
-        // 4. Check for unprocessed files
-        if !unprocessed.is_empty() {
-            for item in &unprocessed {
-                log::error!("Skipped file: {item}");
-            }
-            let msg = format!(
-                "Skipped {} files because they are not caught by any handler. Catch them via -p or ignore them via -i.",
-                unprocessed.len()
-            );
-            log::error!("{msg}");
-            return PerformCommitResult {
-                success: false,
-                logs: vec![],
-                error: Some(msg),
-                size_before_mib: Some(size_before),
-                size_after_mib: None,
-                size_change_pct: None,
-            };
-        }
-
-        // 5. Optional repack
-        if use_repack {
-            if let Err(e) = git_repack(&git_dir_path) {
-                log::warn!("Repack failed: {e}");
-            }
-        } else {
-            log::warn!("--repack is not enabled, Git repository can get bloated");
-        }
-
-        // 6. Count objects after
-        let size_after = match git_count_objects(&git_dir_path) {
-            Ok(s) => {
-                let v = s.total_size_mib();
-                log::info!("Repo size after: {v:.3} MiB");
-                v
-            }
-            Err(e) => {
-                log::warn!("Failed to count git objects: {e}");
-                f64::NAN
-            }
-        };
-
-        let size_change_pct = if size_before.is_finite() && size_before > 0.0 {
-            Some((size_after - size_before) / size_before * 100.0)
-        } else {
-            None
-        };
-
-        if let Some(pct) = size_change_pct {
-            log::info!(
-                "Done. Total size: {size_after:.3} MiB ({pct:+.4}% from {size_before:.3} MiB)"
-            );
-        } else {
-            log::info!("Done. Total size: {size_after:.3} MiB");
-        }
-
-        // 7. Persist author info to git global config
-        if !author_name.is_empty() {
-            let _ = git_command()
-                .args(["config", "--global", "user.name", &author_name])
-                .output();
-        }
-        if !author_email.is_empty() {
-            let _ = git_command()
-                .args(["config", "--global", "user.email", &author_email])
-                .output();
-        }
-
-        PerformCommitResult {
-            success: true,
-            logs: vec![],
-            error: None,
-            size_before_mib: Some(size_before),
-            size_after_mib: Some(size_after),
-            size_change_pct,
-        }
     })
     .await;
 
@@ -365,6 +393,9 @@ async fn perform_restore(
     save_dir: String,
     git_dir: String,
     branch: String,
+    // A specific point in the history to go back to. `None` restores whatever
+    // the branch currently points at.
+    commit: Option<String>,
 ) -> PerformRestoreResult {
     init_logger();
     take_logs(); // drain stale logs
@@ -393,8 +424,16 @@ async fn perform_restore(
         let save_dir_path = PathBuf::from(&save_dir);
         let git_dir_path = PathBuf::from(&git_dir);
 
-        let commit = format!("refs/heads/{branch}");
-        log::info!("Restoring save from '{branch}' using staged checkout...");
+        let commit = match commit.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            Some(chosen) => {
+                log::info!("Restoring the world as it was at {chosen}...");
+                chosen.to_string()
+            }
+            None => {
+                log::info!("Restoring save from '{branch}' using staged checkout...");
+                format!("refs/heads/{branch}")
+            }
+        };
 
         match restore_commit(&save_dir_path, &git_dir_path, &commit) {
             Ok(result) => {
@@ -1123,6 +1162,360 @@ fn delete_save(
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+// ─── Dashboard ──────────────────────────────────────────────────────────────
+
+/// A world folder found inside the Minecraft saves directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FoundWorld {
+    pub name: String,
+    pub path: String,
+    /// When level.dat was last written, ISO 8601. `None` if it cannot be read.
+    pub last_played: Option<String>,
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+/// Where Minecraft keeps its worlds on this platform.
+#[tauri::command]
+fn default_saves_folder() -> String {
+    #[cfg(windows)]
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        return PathBuf::from(appdata)
+            .join(".minecraft")
+            .join("saves")
+            .to_string_lossy()
+            .to_string();
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Some(home) = home_dir() {
+        return home
+            .join("Library")
+            .join("Application Support")
+            .join("minecraft")
+            .join("saves")
+            .to_string_lossy()
+            .to_string();
+    }
+
+    match home_dir() {
+        Some(home) => home
+            .join(".minecraft")
+            .join("saves")
+            .to_string_lossy()
+            .to_string(),
+        None => String::new(),
+    }
+}
+
+/// Every world in a saves folder, newest first.
+///
+/// A world is a directory holding `level.dat`; anything else in the folder is
+/// not a save and is skipped.
+#[tauri::command]
+fn list_worlds_in_folder(folder: String) -> Result<Vec<FoundWorld>, String> {
+    let dir = Path::new(&folder);
+    if !dir.is_dir() {
+        return Err(format!("{folder} is not a folder"));
+    }
+
+    let mut worlds = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("Could not read {folder}: {e}"))? {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        let level = path.join("level.dat");
+        if !level.is_file() {
+            continue;
+        }
+        let last_played = fs::metadata(&level)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .map(|time| DateTime::<Local>::from(time).to_rfc3339());
+        worlds.push(FoundWorld {
+            name: entry.file_name().to_string_lossy().to_string(),
+            path: path.to_string_lossy().to_string(),
+            last_played,
+        });
+    }
+    worlds.sort_by(|a, b| b.last_played.cmp(&a.last_played));
+    Ok(worlds)
+}
+
+/// One point in a world's history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub id: String,
+    pub timestamp: String,
+    pub device: Option<String>,
+    pub note: String,
+}
+
+/// The backups recorded for a world, newest first.
+#[tauri::command]
+fn list_history(git_dir: String, branch: String, limit: u32) -> Result<Vec<HistoryEntry>, String> {
+    // A note may contain newlines, so lines cannot separate records: use the
+    // ASCII unit separator between fields and the record separator between
+    // commits.
+    let output = git_command()
+        .args(["--git-dir", &git_dir, "log", &branch])
+        .arg("--format=%H%x1f%cI%x1f%s%x1f%b%x1e")
+        .arg(format!("--max-count={limit}"))
+        .output()
+        .map_err(|e| format!("Could not read the history: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // A branch with no backups yet is an empty history, not a failure.
+        if stderr.contains("unknown revision") || stderr.contains("bad revision") {
+            return Ok(Vec::new());
+        }
+        return Err(format!("Could not read the history: {}", stderr.trim()));
+    }
+
+    Ok(parse_history(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Split `git log`'s output into entries.
+///
+/// Kept separate from the command that produces it so the parsing can be
+/// tested: a note may contain newlines and the separators are invisible, so a
+/// mistake here is easy to make and hard to see.
+fn parse_history(stdout: &str) -> Vec<HistoryEntry> {
+    stdout
+        .split('\x1e')
+        .map(|record| record.trim_start_matches('\n'))
+        .filter(|record| !record.trim().is_empty())
+        .filter_map(|record| {
+            let mut fields = record.split('\x1f');
+            let id = fields.next()?.to_string();
+            let timestamp = fields.next()?.to_string();
+            let note = fields.next()?.to_string();
+            let device = fields.next().unwrap_or_default().lines().find_map(|line| {
+                line.strip_prefix("MineCommit-Device:")
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            });
+            Some(HistoryEntry {
+                id,
+                timestamp,
+                device,
+                note,
+            })
+        })
+        .collect()
+}
+
+/// The name this computer records on the backups it makes.
+#[tauri::command]
+fn device_name() -> String {
+    current_device_name()
+}
+
+/// What the dashboard needs to know about a world folder itself, as opposed to
+/// its backups.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldState {
+    /// False while Minecraft still has the world open. This is the same
+    /// session.lock check the backup performs, so the dashboard cannot promise
+    /// something the button will then refuse to do.
+    pub idle: bool,
+    /// When level.dat was last written, ISO 8601. Compared against the newest
+    /// backup to tell whether the world has been played since.
+    pub last_played: Option<String>,
+}
+
+#[tauri::command]
+fn world_state(save_dir: String) -> WorldState {
+    let dir = Path::new(&save_dir);
+    WorldState {
+        idle: lock_inactive_world(dir).is_ok(),
+        last_played: fs::metadata(dir.join("level.dat"))
+            .and_then(|meta| meta.modified())
+            .ok()
+            .map(|time| DateTime::<Local>::from(time).to_rfc3339()),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AppSettings {
+    #[serde(default)]
+    pub saves_folder: String,
+}
+
+fn settings_file_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("settings.json")
+}
+
+#[tauri::command]
+fn get_saves_folder(state: tauri::State<AppState>) -> String {
+    let stored = fs::read_to_string(settings_file_path(&state.data_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str::<AppSettings>(&text).ok())
+        .map(|settings| settings.saves_folder)
+        .unwrap_or_default();
+
+    if stored.trim().is_empty() {
+        default_saves_folder()
+    } else {
+        stored
+    }
+}
+
+#[tauri::command]
+fn set_saves_folder(state: tauri::State<AppState>, folder: String) -> Result<(), AppError> {
+    fs::create_dir_all(&state.data_dir)?;
+    let settings = AppSettings {
+        saves_folder: folder,
+    };
+    fs::write(
+        settings_file_path(&state.data_dir),
+        serde_json::to_string_pretty(&settings)?,
+    )?;
+    Ok(())
+}
+
+/// What a backup did. The two halves are reported separately because they can
+/// disagree: an upload that fails leaves a perfectly good backup behind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupResult {
+    /// The world was recorded in the backup repository on this computer.
+    pub backed_up: bool,
+    /// That backup reached the cloud. False when no cloud is set up.
+    pub uploaded: bool,
+    /// Why the backup failed. Nothing was recorded.
+    pub error: Option<String>,
+    /// Why the upload failed. The world is safe on this computer, and the next
+    /// upload carries this backup up with it.
+    pub upload_error: Option<String>,
+}
+
+/// Back up a world and send it to the cloud as one action.
+///
+/// Splitting these was the single most confusing thing about MineCommit: a
+/// player who backed up but did not upload believed their world was safe on
+/// another computer when it was not.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn backup_and_upload(
+    app: tauri::AppHandle,
+    save_dir: String,
+    git_dir: String,
+    branch: String,
+    remote: String,
+    message: String,
+    author_name: String,
+    author_email: String,
+    extra_patterns: Vec<String>,
+    ignore_patterns: Vec<String>,
+    commit_first: bool,
+) -> BackupResult {
+    init_logger();
+    take_logs();
+
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = running.clone();
+    let app_clone = app.clone();
+
+    let log_task = tauri::async_runtime::spawn_blocking(move || {
+        while running_clone.load(Ordering::Relaxed) {
+            for entry in &take_logs() {
+                let _ = app_clone.emit("commit-log", entry);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        for entry in &take_logs() {
+            let _ = app_clone.emit("commit-log", entry);
+        }
+    });
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        // A world that has not been played since its last backup has nothing
+        // new to record, so recording it again would only add a duplicate
+        // entry to the history the player reads. The upload still runs: that
+        // is the half that was left undone.
+        if commit_first {
+            let commit = commit_blocking(
+                save_dir,
+                git_dir.clone(),
+                branch.clone(),
+                message,
+                author_name,
+                author_email,
+                extra_patterns,
+                ignore_patterns,
+                true,
+            );
+            if !commit.success {
+                return BackupResult {
+                    backed_up: false,
+                    uploaded: false,
+                    error: commit.error,
+                    upload_error: None,
+                };
+            }
+        } else {
+            log::info!("Nothing new has been played, so uploading the existing backup");
+        }
+
+        if remote.trim().is_empty() {
+            log::info!("No cloud repository is set up, so the backup stays on this computer");
+            return BackupResult {
+                backed_up: true,
+                uploaded: false,
+                error: None,
+                upload_error: None,
+            };
+        }
+
+        log::info!("Uploading to the cloud...");
+        let upload = RemoteSync::new(PathBuf::from(&git_dir), &branch).and_then(|sync| {
+            sync.configure_remote(&remote)?;
+            sync.push()
+        });
+        match upload {
+            Ok(status) => {
+                log::info!("{}", status.state.description());
+                log::info!("Upload complete");
+                BackupResult {
+                    backed_up: true,
+                    uploaded: true,
+                    error: None,
+                    upload_error: None,
+                }
+            }
+            Err(error) => {
+                // The world is already safe on this computer, so this is a
+                // partial success, not a failed backup.
+                let message = format!("{error:#}");
+                log::error!("Backed up on this computer, but the upload failed: {message}");
+                BackupResult {
+                    backed_up: true,
+                    uploaded: false,
+                    error: None,
+                    upload_error: Some(message),
+                }
+            }
+        }
+    })
+    .await;
+
+    running.store(false, Ordering::Relaxed);
+    let _ = log_task.await;
+    let _ = app.emit("commit-finished", ());
+
+    result.unwrap_or_else(|e| BackupResult {
+        backed_up: false,
+        uploaded: false,
+        error: Some(format!("Join error: {e}")),
+        upload_error: None,
+    })
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1163,7 +1556,83 @@ pub fn run() {
             list_remote_branches,
             list_local_branches,
             clone_save_from_cloud,
+            default_saves_folder,
+            list_worlds_in_folder,
+            list_history,
+            device_name,
+            world_state,
+            get_saves_folder,
+            set_saves_folder,
+            backup_and_upload,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One record exactly as `git log --format=%H%x1f%cI%x1f%s%x1f%b%x1e`
+    /// writes it, including the newline Git puts before the next record.
+    fn record(id: &str, timestamp: &str, subject: &str, body: &str) -> String {
+        format!("{id}\x1f{timestamp}\x1f{subject}\x1f{body}\x1e\n")
+    }
+
+    #[test]
+    fn reads_the_device_a_backup_was_made_on() {
+        let stdout = record(
+            "abc123",
+            "2026-08-22T11:45:59+08:00",
+            "Backup",
+            "MineCommit-Device: Juny's PC\n",
+        );
+
+        let entries = parse_history(&stdout);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "abc123");
+        assert_eq!(entries[0].timestamp, "2026-08-22T11:45:59+08:00");
+        assert_eq!(entries[0].note, "Backup");
+        assert_eq!(entries[0].device.as_deref(), Some("Juny's PC"));
+    }
+
+    #[test]
+    fn a_note_containing_blank_lines_does_not_split_the_entry() {
+        // The reason records are separated by \x1e rather than by lines: a
+        // player's note is free text and may contain anything.
+        let stdout = format!(
+            "{}{}",
+            record(
+                "aaa",
+                "2026-08-22T10:00:00+08:00",
+                "Built the nether portal",
+                "first line\n\nsecond line\nMineCommit-Device: Laptop\n",
+            ),
+            record("bbb", "2026-08-21T10:00:00+08:00", "Backup", ""),
+        );
+
+        let entries = parse_history(&stdout);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].note, "Built the nether portal");
+        assert_eq!(entries[0].device.as_deref(), Some("Laptop"));
+        assert_eq!(entries[1].id, "bbb");
+        assert_eq!(entries[1].device, None);
+    }
+
+    #[test]
+    fn a_repository_with_no_backups_yields_no_entries() {
+        assert!(parse_history("").is_empty());
+        assert!(parse_history("\n").is_empty());
+    }
+
+    #[test]
+    fn the_saves_folder_default_ends_at_the_saves_directory() {
+        // The dashboard opens on this path, so a wrong one means an empty
+        // "add a world" list on a fresh install.
+        let folder = default_saves_folder();
+        assert!(
+            folder.is_empty() || folder.ends_with("saves"),
+            "unexpected default saves folder: {folder}"
+        );
+    }
 }
