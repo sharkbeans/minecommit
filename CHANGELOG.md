@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.1 (2026-08-22)
+
+Bug fixes
+
+- Look up the branches of a cloud repository again. "Add a world" passed the
+  repository address under the wrong name, so the lookup failed with
+  "invalid args `remoteUrl` for command `list_remote_branches`" and a world
+  could not be downloaded from the cloud at all.
+- Build the path for a downloaded world with the separator its saves folder
+  already uses, instead of always a forward slash.
+
+Internal
+
+- Check that every `invoke` in the frontend passes exactly the arguments its
+  Rust command declares, and run it in CI before a release is created. Tauri
+  resolves these by name at runtime, so the bug above type-checked, built and
+  shipped without anything noticing.
+- Cover the world scan behind "Add a world": only folders holding level.dat
+  are offered, and a saves folder that is not there is reported rather than
+  read as empty.
+
 ## 0.5.0 (2026-08-22)
 
 The dashboard has been rebuilt around what a player is trying to do, rather
