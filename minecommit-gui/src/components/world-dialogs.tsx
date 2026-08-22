@@ -24,6 +24,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import type { GitHubAccount } from "@/components/github-account"
 import { useCommitAuthor } from "@/contexts/commit-author"
 import { localeOptions, useI18n, type Locale } from "@/contexts/i18n"
 import { useSaves, type Save } from "@/contexts/saves"
@@ -373,61 +374,222 @@ function AddFromCloud({
 
 /* ── Connect a world to GitHub ───────────────────────────────────────────── */
 
+/** GitHub allows letters, digits, dot, dash and underscore in a name. */
+function asRepositoryName(world: string) {
+  return world.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "minecraft-world"
+}
+
+/**
+ * Connecting a world is the first thing a player does that involves GitHub at
+ * all, so it carries the whole path: sign in if needed, then either have a
+ * private repository made for them or point at one they already have.
+ */
 export function ConnectCloudDialog({
   open,
   onOpenChange,
   save,
+  account,
+  onNeedSignIn,
   onConnected,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   save: Save | null
+  account: GitHubAccount | null
+  onNeedSignIn: () => void
   onConnected: () => Promise<void> | void
 }) {
   const { t } = useI18n()
-  const [address, setAddress] = useState(() => save?.remote_repo_path ?? "")
-  const [branch, setBranch] = useState(
-    () => save?.default_branch || save?.name || "main"
+  const { saves } = useSaves()
+  const suggested = asRepositoryName(save?.name ?? "")
+
+  // One repository holds many worlds, a branch each. Once the player has set
+  // one up, adding the next world to it is almost always what they want, so it
+  // leads rather than hiding behind "use one I already have".
+  const knownRepos = useMemo(
+    () =>
+      [
+        ...new Set(
+          saves
+            .filter((other) => other.name !== save?.name)
+            .map((other) => other.remote_repo_path.trim())
+            .filter(Boolean)
+        ),
+      ],
+    [save?.name, saves]
   )
+
+  const [mode, setMode] = useState<"reuse" | "create" | "existing">(
+    knownRepos.length > 0 ? "reuse" : "create"
+  )
+  const [reuseRepo, setReuseRepo] = useState(knownRepos[0] ?? "")
+  const [repoName, setRepoName] = useState(suggested)
+  const [address, setAddress] = useState(() => save?.remote_repo_path ?? "")
+  const [branch, setBranch] = useState(suggested)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
 
-  const connect = useCallback(async () => {
-    if (!save || busy) return
-    setBusy(true)
-    setError("")
-    try {
+  const connect = useCallback(
+    async (remoteUrl: string) => {
+      if (!save) return
       await invoke<Save>("configure_save_cloud", {
         name: save.name,
-        remoteUrl: address.trim(),
+        remoteUrl: remoteUrl.trim(),
         branch: branch.trim(),
       })
       await onConnected()
       onOpenChange(false)
+    },
+    [branch, onConnected, onOpenChange, save]
+  )
+
+  const createAndConnect = useCallback(async () => {
+    if (!save || busy) return
+    setBusy(true)
+    setError("")
+    try {
+      const cloneUrl = await invoke<string>("create_github_repository", {
+        name: repoName.trim(),
+      })
+      await connect(cloneUrl)
     } catch (err) {
       setError(cloudErrorLabel(errorText(err), t))
     } finally {
       setBusy(false)
     }
-  }, [address, branch, busy, onConnected, onOpenChange, save, t])
+  }, [busy, connect, repoName, save, t])
+
+  const connectTo = useCallback(
+    async (remoteUrl: string) => {
+      if (!save || busy) return
+      setBusy(true)
+      setError("")
+      try {
+        await connect(remoteUrl)
+      } catch (err) {
+        setError(cloudErrorLabel(errorText(err), t))
+      } finally {
+        setBusy(false)
+      }
+    },
+    [busy, connect, save, t]
+  )
+
+  if (!account) {
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{t("connect.title")}</DialogTitle>
+            <DialogDescription>{t("connect.body")}</DialogDescription>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">{t("gh.signInFirst")}</p>
+          <DialogFooter>
+            <DialogClose render={<Button variant="outline">{t("common.cancel")}</Button>} />
+            <Button
+              onClick={() => {
+                onOpenChange(false)
+                onNeedSignIn()
+              }}
+            >
+              {t("gh.signIn")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    )
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>{t("connect.title")}</DialogTitle>
-          <DialogDescription>{t("connect.body")}</DialogDescription>
+          <DialogTitle>{t("gh.chooseTitle", { world: save?.name ?? "" })}</DialogTitle>
+          <DialogDescription>{t("gh.chooseBody")}</DialogDescription>
         </DialogHeader>
+
+        <div className="flex flex-col gap-2">
+          {(
+            [
+              ...(knownRepos.length > 0 ? (["reuse"] as const) : []),
+              "create",
+              "existing",
+            ] as const
+          ).map((value) => (
+            <label
+              key={value}
+              className={cn(
+                "flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors",
+                mode === value ? "border-primary bg-muted/50" : "hover:bg-muted/30"
+              )}
+            >
+              <input
+                type="radio"
+                name="connect-mode"
+                className="mt-1"
+                checked={mode === value}
+                onChange={() => setMode(value)}
+              />
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm">
+                  {value === "reuse"
+                    ? t("gh.reuse")
+                    : value === "create"
+                      ? t("gh.createRepo")
+                      : t("gh.useExisting")}
+                </span>
+                {value !== "existing" && (
+                  <span className="block text-xs text-muted-foreground">
+                    {value === "reuse" ? t("gh.reuseHelp") : t("gh.createRepoHelp")}
+                  </span>
+                )}
+              </span>
+            </label>
+          ))}
+        </div>
+
         <FieldGroup>
-          <Field>
-            <Label htmlFor="connect-address">{t("connect.address")}</Label>
-            <Input
-              id="connect-address"
-              value={address}
-              placeholder="https://github.com/you/my-worlds.git"
-              onChange={(e) => setAddress(e.target.value)}
-            />
-          </Field>
+          {mode === "reuse" ? (
+            <Field>
+              <Label htmlFor="connect-reuse">{t("gh.chooseRepo")}</Label>
+              <Select value={reuseRepo} onValueChange={(value) => setReuseRepo(value ?? "")}>
+                <SelectTrigger id="connect-reuse" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {knownRepos.map((repo) => (
+                    <SelectItem key={repo} value={repo}>
+                      {repo}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          ) : mode === "create" ? (
+            <Field>
+              <Label htmlFor="connect-repo-name">{t("gh.repoName")}</Label>
+              <div className="flex items-center gap-2">
+                <span className="shrink-0 text-sm text-muted-foreground">
+                  {account.login}/
+                </span>
+                <Input
+                  id="connect-repo-name"
+                  value={repoName}
+                  onChange={(e) => setRepoName(e.target.value)}
+                />
+              </div>
+            </Field>
+          ) : (
+            <Field>
+              <Label htmlFor="connect-address">{t("connect.address")}</Label>
+              <Input
+                id="connect-address"
+                value={address}
+                placeholder="https://github.com/you/my-worlds.git"
+                onChange={(e) => setAddress(e.target.value)}
+              />
+            </Field>
+          )}
           <Field>
             <Label htmlFor="connect-branch">{t("connect.branch")}</Label>
             <Input
@@ -438,16 +600,38 @@ export function ConnectCloudDialog({
             <p className="text-xs text-muted-foreground">{t("connect.branchHelp")}</p>
           </Field>
         </FieldGroup>
-        <p className="text-xs text-muted-foreground">{t("connect.credentialHelp")}</p>
-        {error && <p className="text-sm text-destructive">{error}</p>}
+
+        {mode === "create" && !account.can_create_repository && (
+          <p className="text-sm text-amber-600 dark:text-amber-400">
+            {t("gh.sessionExpired")}
+          </p>
+        )}
+        {error && <p className="text-sm break-words text-destructive">{error}</p>}
+
         <DialogFooter>
           <DialogClose render={<Button variant="outline">{t("common.cancel")}</Button>} />
-          <Button
-            onClick={() => void connect()}
-            disabled={busy || !address.trim() || !branch.trim()}
-          >
-            {busy ? t("connect.connecting") : t("connect.connect")}
-          </Button>
+          {mode === "reuse" ? (
+            <Button
+              onClick={() => void connectTo(reuseRepo)}
+              disabled={busy || !reuseRepo || !branch.trim()}
+            >
+              {busy ? t("connect.connecting") : t("connect.connect")}
+            </Button>
+          ) : mode === "create" ? (
+            <Button
+              onClick={() => void createAndConnect()}
+              disabled={busy || !repoName.trim() || !branch.trim()}
+            >
+              {busy ? t("gh.creating") : t("gh.create")}
+            </Button>
+          ) : (
+            <Button
+              onClick={() => void connectTo(address)}
+              disabled={busy || !address.trim() || !branch.trim()}
+            >
+              {busy ? t("connect.connecting") : t("connect.connect")}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

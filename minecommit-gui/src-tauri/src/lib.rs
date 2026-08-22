@@ -627,6 +627,60 @@ fn get_cloud_status(
     sync.status().map_err(|e| format!("{e:#}"))
 }
 
+/// Make sure a world has somewhere to keep its backups.
+///
+/// A tracked world whose bare repository does not exist cannot be backed up,
+/// checked or connected: everything that touches it fails with "is not a bare
+/// Git repository", and nothing in the interface offers to create one. Since
+/// creating it is always the right answer, adding a world does it up front and
+/// never leaves a half-added world behind.
+fn ensure_bare_repo(repo_path: &str, default_branch: &str) -> Result<(), AppError> {
+    let existing = git_command()
+        .args(["--git-dir", repo_path, "rev-parse", "--is-bare-repository"])
+        .output();
+    let is_bare = existing
+        .map(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true")
+        .unwrap_or(false);
+    if is_bare {
+        return Ok(());
+    }
+
+    if let Some(parent) = Path::new(repo_path).parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let branch = match default_branch.trim() {
+        "" => DEFAULT_BRANCH,
+        chosen => chosen,
+    };
+    log::info!("Creating the backup repository at {repo_path}");
+    let output = git_command()
+        .args([
+            "init",
+            "--bare",
+            &format!("--initial-branch={branch}"),
+            repo_path,
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(AppError::Git(format!(
+            "Could not create the backup repository: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+/// Create the backup repository for a world that was added without one.
+#[tauri::command]
+fn repair_world_repository(state: tauri::State<AppState>, name: String) -> Result<(), AppError> {
+    let saves = state.saves.lock().unwrap();
+    let save = saves
+        .iter()
+        .find(|save| save.name == name)
+        .ok_or(AppError::SaveNotFound(name))?;
+    ensure_bare_repo(&save.repo_path, &save.default_branch)
+}
+
 #[tauri::command]
 fn check_repo_exists(repo_path: String) -> Result<bool, String> {
     let output = git_command()
@@ -665,6 +719,10 @@ fn init_bare_repo(repo_path: String, default_branch: String) -> Result<(), Strin
 struct AppState {
     saves: Mutex<Vec<Save>>,
     data_dir: PathBuf,
+    /// The GitHub token entered this session, held only so a backup repository
+    /// can be created without asking for it twice. It is never written to
+    /// MineCommit's own files; Git's credential store keeps the durable copy.
+    github_token: Mutex<Option<String>>,
 }
 
 fn saves_file_path(data_dir: &Path) -> PathBuf {
@@ -745,6 +803,8 @@ fn add_save(
     if saves.iter().any(|s| s.name == name) {
         return Err(AppError::DuplicateName(name));
     }
+
+    ensure_bare_repo(&repo_path, &default_branch)?;
 
     if !remote_repo_path.trim().is_empty() {
         let sync = RemoteSync::new(PathBuf::from(&repo_path), &default_branch)
@@ -1345,20 +1405,36 @@ fn world_state(save_dir: String) -> WorldState {
 pub struct AppSettings {
     #[serde(default)]
     pub saves_folder: String,
+    /// The GitHub account MineCommit is signed in as. The token itself is not
+    /// here: it goes to Git's credential store.
+    #[serde(default)]
+    pub github_login: String,
+    #[serde(default)]
+    pub github_avatar: String,
 }
 
 fn settings_file_path(data_dir: &Path) -> PathBuf {
     data_dir.join("settings.json")
 }
 
+fn read_settings(data_dir: &Path) -> AppSettings {
+    fs::read_to_string(settings_file_path(data_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_settings(data_dir: &Path, settings: &AppSettings) -> Result<(), String> {
+    fs::create_dir_all(data_dir).map_err(|e| format!("Could not save your settings: {e}"))?;
+    let text = serde_json::to_string_pretty(settings)
+        .map_err(|e| format!("Could not save your settings: {e}"))?;
+    fs::write(settings_file_path(data_dir), text)
+        .map_err(|e| format!("Could not save your settings: {e}"))
+}
+
 #[tauri::command]
 fn get_saves_folder(state: tauri::State<AppState>) -> String {
-    let stored = fs::read_to_string(settings_file_path(&state.data_dir))
-        .ok()
-        .and_then(|text| serde_json::from_str::<AppSettings>(&text).ok())
-        .map(|settings| settings.saves_folder)
-        .unwrap_or_default();
-
+    let stored = read_settings(&state.data_dir).saves_folder;
     if stored.trim().is_empty() {
         default_saves_folder()
     } else {
@@ -1367,16 +1443,10 @@ fn get_saves_folder(state: tauri::State<AppState>) -> String {
 }
 
 #[tauri::command]
-fn set_saves_folder(state: tauri::State<AppState>, folder: String) -> Result<(), AppError> {
-    fs::create_dir_all(&state.data_dir)?;
-    let settings = AppSettings {
-        saves_folder: folder,
-    };
-    fs::write(
-        settings_file_path(&state.data_dir),
-        serde_json::to_string_pretty(&settings)?,
-    )?;
-    Ok(())
+fn set_saves_folder(state: tauri::State<AppState>, folder: String) -> Result<(), String> {
+    let mut settings = read_settings(&state.data_dir);
+    settings.saves_folder = folder;
+    write_settings(&state.data_dir, &settings)
 }
 
 /// What a backup did. The two halves are reported separately because they can
@@ -1516,6 +1586,279 @@ async fn backup_and_upload(
     })
 }
 
+// ─── GitHub account ─────────────────────────────────────────────────────────
+
+/// The GitHub user MineCommit is signed in as.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubAccount {
+    pub login: String,
+    pub avatar_url: Option<String>,
+    /// Whether a repository can be created without asking for the token again.
+    /// The token lives in Git's credential store, which MineCommit does not
+    /// read back, so this is true only for the session it was entered in.
+    pub can_create_repository: bool,
+}
+
+/// GitHub asks for this, and refuses requests without one.
+const USER_AGENT: &str = concat!("MineCommit/", env!("CARGO_PKG_VERSION"));
+
+fn github_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .map_err(|e| format!("Could not start an HTTPS client: {e}"))
+}
+
+/// Ask GitHub who a token belongs to. Doubles as the check that it is valid
+/// and has not expired.
+async fn github_user(token: &str) -> Result<(String, Option<String>), String> {
+    let response = github_client()?
+        .get("https://api.github.com/user")
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach GitHub: {e}"))?;
+
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err("GitHub did not accept that token. Check it was copied in full and has not expired.".into());
+    }
+    if !response.status().is_success() {
+        return Err(format!("GitHub refused the sign-in ({})", response.status()));
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("GitHub sent something unexpected: {e}"))?;
+    let login = body
+        .get("login")
+        .and_then(|v| v.as_str())
+        .ok_or("GitHub did not say which account that token belongs to")?
+        .to_string();
+    let avatar = body
+        .get("avatar_url")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    Ok((login, avatar))
+}
+
+/// Git needs somewhere to keep the token, or every push would ask for it again.
+///
+/// An existing choice is always respected. Otherwise the best available store
+/// is picked: Windows has the Credential Manager through `manager`, desktop
+/// Linux usually has libsecret, and `store` -- a plain file in the home
+/// directory -- is the last resort.
+fn ensure_credential_helper() -> Result<(), String> {
+    let configured = git_command()
+        .args(["config", "--get", "credential.helper"])
+        .output()
+        .map_err(|e| format!("Could not read your Git configuration: {e}"))?;
+    if configured.status.success() && !String::from_utf8_lossy(&configured.stdout).trim().is_empty()
+    {
+        return Ok(());
+    }
+
+    let helper = if cfg!(windows) {
+        "manager"
+    } else if libsecret_available() {
+        "libsecret"
+    } else {
+        "store"
+    };
+
+    let set = git_command()
+        .args(["config", "--global", "credential.helper", helper])
+        .output()
+        .map_err(|e| format!("Could not update your Git configuration: {e}"))?;
+    anyhow_ensure_success(set, "Could not tell Git where to keep the sign-in")
+}
+
+fn libsecret_available() -> bool {
+    let Ok(output) = git_command().arg("--exec-path").output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let exec_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Path::new(&exec_path)
+        .join("git-credential-libsecret")
+        .exists()
+}
+
+fn anyhow_ensure_success(output: std::process::Output, context: &str) -> Result<(), String> {
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{context}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+/// Hand the token to Git's credential store so pushes and fetches authenticate
+/// without asking. MineCommit never writes the token to its own files.
+fn store_git_credential(login: &str, token: &str) -> Result<(), String> {
+    ensure_credential_helper()?;
+    run_credential("approve", login, Some(token))
+}
+
+fn forget_git_credential(login: &str) -> Result<(), String> {
+    run_credential("reject", login, None)
+}
+
+/// The description Git reads on stdin: `key=value` lines, terminated by a
+/// blank one. Without the terminator Git waits for more input forever.
+fn credential_description(login: &str, token: Option<&str>) -> String {
+    let mut input = format!("protocol=https\nhost=github.com\nusername={login}\n");
+    if let Some(token) = token {
+        input.push_str(&format!("password={token}\n"));
+    }
+    input.push('\n');
+    input
+}
+
+fn run_credential(action: &str, login: &str, token: Option<&str>) -> Result<(), String> {
+    use std::io::Write;
+
+    let input = credential_description(login, token);
+
+    let mut child = git_command()
+        .args(["credential", action])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Could not run Git: {e}"))?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or("Could not talk to Git")?
+        .write_all(input.as_bytes())
+        .map_err(|e| format!("Could not talk to Git: {e}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Git did not finish: {e}"))?;
+    anyhow_ensure_success(output, "Git could not store the sign-in")
+}
+
+#[tauri::command]
+async fn github_sign_in(
+    state: tauri::State<'_, AppState>,
+    token: String,
+) -> Result<GitHubAccount, String> {
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        return Err("Paste the token you copied from GitHub".into());
+    }
+
+    let (login, avatar_url) = github_user(&token).await?;
+    store_git_credential(&login, &token)?;
+
+    let mut settings = read_settings(&state.data_dir);
+    settings.github_login = login.clone();
+    settings.github_avatar = avatar_url.clone().unwrap_or_default();
+    write_settings(&state.data_dir, &settings)?;
+
+    // Kept only in memory, and only so "create a repository for me" works
+    // during the sign-in it belongs to.
+    *state.github_token.lock().unwrap() = Some(token);
+
+    Ok(GitHubAccount {
+        login,
+        avatar_url,
+        can_create_repository: true,
+    })
+}
+
+#[tauri::command]
+fn github_account(state: tauri::State<AppState>) -> Option<GitHubAccount> {
+    let settings = read_settings(&state.data_dir);
+    if settings.github_login.trim().is_empty() {
+        return None;
+    }
+    Some(GitHubAccount {
+        login: settings.github_login,
+        avatar_url: Some(settings.github_avatar).filter(|url| !url.is_empty()),
+        can_create_repository: state.github_token.lock().unwrap().is_some(),
+    })
+}
+
+#[tauri::command]
+fn github_sign_out(state: tauri::State<AppState>) -> Result<(), String> {
+    let mut settings = read_settings(&state.data_dir);
+    let login = std::mem::take(&mut settings.github_login);
+    settings.github_avatar = String::new();
+    write_settings(&state.data_dir, &settings)?;
+    *state.github_token.lock().unwrap() = None;
+
+    if !login.trim().is_empty() {
+        // Best effort: the account is signed out of MineCommit either way, and
+        // a credential store that refuses to forget should not look like a
+        // failed sign-out.
+        if let Err(error) = forget_git_credential(&login) {
+            log::warn!("Could not remove the saved GitHub sign-in: {error}");
+        }
+    }
+    Ok(())
+}
+
+/// Create a private repository to hold a world's backups, and return the
+/// address to connect it to.
+#[tauri::command]
+async fn create_github_repository(
+    state: tauri::State<'_, AppState>,
+    name: String,
+) -> Result<String, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Give the repository a name".into());
+    }
+
+    let token = state
+        .github_token
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Sign in to GitHub again to create a repository from here")?;
+
+    let response = github_client()?
+        .post("https://api.github.com/user/repos")
+        .bearer_auth(&token)
+        .header("Accept", "application/vnd.github+json")
+        .json(&serde_json::json!({
+            "name": name,
+            "private": true,
+            // A first upload can only fast-forward, so the repository has to be
+            // empty: no README, no .gitignore, no licence.
+            "auto_init": false,
+            "description": "Minecraft world backups, made by MineCommit",
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach GitHub: {e}"))?;
+
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+
+    if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+        return Err(format!("You already have a repository named {name}"));
+    }
+    if !status.is_success() {
+        let message = body
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("GitHub refused to create the repository");
+        return Err(format!("{message} ({status})"));
+    }
+
+    body.get("clone_url")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "GitHub created the repository but did not say where it is".into())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1531,6 +1874,7 @@ pub fn run() {
             app.manage(AppState {
                 saves: Mutex::new(saves),
                 data_dir,
+                github_token: Mutex::new(None),
             });
 
             Ok(())
@@ -1564,6 +1908,11 @@ pub fn run() {
             get_saves_folder,
             set_saves_folder,
             backup_and_upload,
+            repair_world_repository,
+            github_sign_in,
+            github_account,
+            github_sign_out,
+            create_github_repository,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1659,6 +2008,116 @@ mod tests {
         let state = world_state(save.path().to_string_lossy().to_string());
         assert!(state.idle, "a world with no session.lock is not in use");
         assert!(state.last_played.is_some());
+    }
+
+    /// Reaches api.github.com, so it is not part of the normal suite. Run with
+    /// `cargo test -p minecommit-gui -- --ignored` to check that the HTTPS
+    /// stack works: a rustls build with no crypto provider installed panics at
+    /// the first request rather than failing to compile.
+    #[tokio::test]
+    #[ignore = "requires network access"]
+    async fn github_rejects_a_token_that_is_not_one() {
+        let error = github_user("not-a-real-token")
+            .await
+            .expect_err("GitHub accepted a nonsense token");
+        assert!(
+            error.contains("did not accept"),
+            "expected a rejected-token message, got: {error}"
+        );
+    }
+
+    fn git_in(repo: &str, args: &[&str]) -> String {
+        let out = git_command()
+            .args(["--git-dir", repo])
+            .args(args)
+            .output()
+            .expect("run git");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn a_world_added_without_a_repository_gets_one() {
+        // Adding a world used to record where its backups would live without
+        // ever creating it, so everything afterwards failed with "is not a
+        // bare Git repository" and no screen offered to fix it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir
+            .path()
+            .join("minecommit")
+            .join("my world.git")
+            .to_string_lossy()
+            .to_string();
+
+        ensure_bare_repo(&repo, "my-world").expect("create the repository");
+
+        assert_eq!(git_in(&repo, &["rev-parse", "--is-bare-repository"]), "true");
+        assert_eq!(
+            git_in(&repo, &["symbolic-ref", "HEAD"]),
+            "refs/heads/my-world",
+            "the world's branch should be the one it was added with"
+        );
+    }
+
+    #[test]
+    fn a_repository_that_already_exists_is_left_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("world.git").to_string_lossy().to_string();
+        ensure_bare_repo(&repo, "original").expect("create");
+
+        // Asking again, with a different branch, must not disturb the backups
+        // already in there.
+        ensure_bare_repo(&repo, "something-else").expect("second call");
+
+        assert_eq!(git_in(&repo, &["symbolic-ref", "HEAD"]), "refs/heads/original");
+    }
+
+    #[test]
+    fn a_credential_description_ends_with_a_blank_line() {
+        let approve = credential_description("octocat", Some("ghp_secret"));
+        assert_eq!(
+            approve,
+            "protocol=https\nhost=github.com\nusername=octocat\npassword=ghp_secret\n\n"
+        );
+
+        // Rejecting a credential carries no password.
+        let reject = credential_description("octocat", None);
+        assert_eq!(reject, "protocol=https\nhost=github.com\nusername=octocat\n\n");
+        assert!(reject.ends_with("\n\n"), "Git would wait for more input");
+    }
+
+    #[test]
+    fn settings_written_before_sign_in_existed_still_load() {
+        // Upgrading must not lose the saves folder someone already chose.
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            settings_file_path(dir.path()),
+            r#"{"saves_folder": "/home/player/.minecraft/saves"}"#,
+        )
+        .unwrap();
+
+        let settings = read_settings(dir.path());
+        assert_eq!(settings.saves_folder, "/home/player/.minecraft/saves");
+        assert!(settings.github_login.is_empty());
+    }
+
+    #[test]
+    fn an_account_survives_a_round_trip_but_the_token_is_never_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = AppSettings {
+            saves_folder: "/saves".into(),
+            github_login: "octocat".into(),
+            github_avatar: "https://example.invalid/a.png".into(),
+        };
+        write_settings(dir.path(), &settings).expect("write");
+
+        let read_back = read_settings(dir.path());
+        assert_eq!(read_back.github_login, "octocat");
+        assert_eq!(read_back.saves_folder, "/saves");
+
+        // The token belongs to Git's credential store, not to MineCommit's files.
+        let raw = fs::read_to_string(settings_file_path(dir.path())).unwrap();
+        assert!(!raw.contains("token"), "settings.json must not carry a token");
+        assert!(!raw.contains("password"));
     }
 
     #[test]

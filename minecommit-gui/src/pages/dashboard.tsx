@@ -26,6 +26,11 @@ import {
   RestorePointDialog,
   SettingsDialog,
 } from "@/components/world-dialogs"
+import {
+  AccountMenu,
+  GitHubSignInDialog,
+  type GitHubAccount,
+} from "@/components/github-account"
 import { useCommitAuthor } from "@/contexts/commit-author"
 import { useI18n, type TranslationKey } from "@/contexts/i18n"
 import { useSaves, type Save } from "@/contexts/saves"
@@ -83,6 +88,7 @@ export function DashboardPage() {
 
   const [savesFolder, setSavesFolder] = useState("")
   const [thisDevice, setThisDevice] = useState("")
+  const [account, setAccount] = useState<GitHubAccount | null>(null)
   const [statuses, setStatuses] = useState<Record<string, CloudStatus | null>>({})
   const [worldStates, setWorldStates] = useState<Record<string, WorldState>>({})
   const [historyByWorld, setHistoryByWorld] = useState<Record<string, HistoryEntry[]>>({})
@@ -102,6 +108,7 @@ export function DashboardPage() {
   const [removeOpen, setRemoveOpen] = useState(false)
   const [restorePoint, setRestorePoint] = useState<HistoryEntry | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [signInOpen, setSignInOpen] = useState(false)
 
   /* Saves folder ------------------------------------------------------- */
 
@@ -112,6 +119,9 @@ export function DashboardPage() {
     invoke<string>("device_name")
       .then(setThisDevice)
       .catch(() => setThisDevice(""))
+    invoke<GitHubAccount | null>("github_account")
+      .then(setAccount)
+      .catch(() => setAccount(null))
   }, [])
 
   const changeSavesFolder = useCallback((folder: string) => {
@@ -122,20 +132,43 @@ export function DashboardPage() {
   /* Per-world state ---------------------------------------------------- */
 
   const readStatus = useCallback(
-    async (save: Save, refresh: boolean) => {
-      try {
-        const status = await invoke<CloudStatus>("get_cloud_status", {
+    async (save: Save, refresh: boolean): Promise<CloudStatus | null> => {
+      const load = () =>
+        invoke<CloudStatus>("get_cloud_status", {
           gitDir: save.repo_path,
           branch: save.default_branch || "main",
           refresh,
         })
+
+      const succeeded = (status: CloudStatus) => {
         setStatuses((current) => ({ ...current, [save.name]: status }))
         if (refresh) setStatusError("")
         return status
-      } catch (err) {
+      }
+      const failed = (message: string) => {
         setStatuses((current) => ({ ...current, [save.name]: null }))
-        if (refresh) setStatusError(cloudErrorLabel(errorText(err), t))
+        if (refresh) setStatusError(message)
         return null
+      }
+
+      try {
+        return succeeded(await load())
+      } catch (err) {
+        const message = errorText(err)
+
+        // A tracked world with no backup repository was added before adding
+        // one created it. Nothing can happen to that world until it exists and
+        // creating it is always what the player wants, so do it and carry on
+        // rather than reporting a dead end nothing in the app can clear.
+        if (!message.includes("not a bare Git repository")) {
+          return failed(cloudErrorLabel(message, t))
+        }
+        try {
+          await invoke("repair_world_repository", { name: save.name })
+          return succeeded(await load())
+        } catch (repairError) {
+          return failed(cloudErrorLabel(errorText(repairError), t))
+        }
       }
     },
     [t]
@@ -377,9 +410,11 @@ export function DashboardPage() {
               {repoLabel(status?.remote_url ?? selectedSave.remote_repo_path)}
             </span>
           )}
-          {author.name && (
-            <span className="text-xs text-muted-foreground">{author.name}</span>
-          )}
+          <AccountMenu
+            account={account}
+            onSignIn={() => setSignInOpen(true)}
+            onSignedOut={() => setAccount(null)}
+          />
           <Button variant="ghost" size="icon-sm" onClick={() => setSettingsOpen(true)}>
             <Settings2 />
             <span className="sr-only">{t("dash.settings")}</span>
@@ -551,7 +586,9 @@ export function DashboardPage() {
             if (!name) return
             const all = await invoke<Save[]>("list_saves")
             const added = all.find((save) => save.name === name)
-            if (added) selectWorld(added)
+            if (!added) return
+            selectWorld(added)
+            if (!added.remote_repo_path) setConnectOpen(true)
           })()
         }}
       />
@@ -560,6 +597,8 @@ export function DashboardPage() {
         open={connectOpen}
         onOpenChange={setConnectOpen}
         save={selectedSave}
+        account={account}
+        onNeedSignIn={() => setSignInOpen(true)}
         onConnected={async () => {
           await refreshSaves()
           await refreshSelected()
@@ -590,6 +629,17 @@ export function DashboardPage() {
         onOpenChange={setSettingsOpen}
         savesFolder={savesFolder}
         onSavesFolderChange={changeSavesFolder}
+      />
+      <GitHubSignInDialog
+        key={`signInOpen-${signInOpen}`}
+        open={signInOpen}
+        onOpenChange={setSignInOpen}
+        onSignedIn={(signedIn) => {
+          setAccount(signedIn)
+          // Signing in is nearly always something the player started in order
+          // to connect a world, so carry them back to that.
+          if (selectedSave && !selectedSave.remote_repo_path) setConnectOpen(true)
+        }}
       />
       <RollingLogDialog
         open={logOpen}
@@ -802,9 +852,15 @@ function ActionCard({
       )}
 
       {situation === "no_cloud" && (
-        <Button size="lg" onClick={onConnect}>
-          {t("state.noCloud.action")}
-        </Button>
+        <div className="flex flex-col items-center gap-2">
+          <Button size="lg" onClick={onConnect}>
+            {t("state.noCloud.action")}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onBackUp}>
+            <Upload data-icon="inline-start" />
+            {t("state.backUpNow")}
+          </Button>
+        </div>
       )}
     </div>
   )
