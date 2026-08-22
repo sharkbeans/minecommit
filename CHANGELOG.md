@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.1 (2026-08-22)
+
+Bug fixes
+
+- The GitHub button in the top right did nothing when you were signed in. The
+  menu behind it was never reachable, which meant signing out, opening your
+  profile, and changing which repositories MineCommit may use were all
+  unavailable once you had an account. The menu is now written out directly
+  rather than built on a dropdown component whose trigger never opened it.
+
 ## 0.9.0 (2026-08-22)
 
 The app now explains itself. It was built for someone who already knew what it
