@@ -2325,6 +2325,37 @@ mod tests {
         assert_eq!(git_in(&repo, &["symbolic-ref", "HEAD"]), "refs/heads/original");
     }
 
+    /// The client ID and slug are compiled in, so a release built without them
+    /// looks completely normal until someone tries to sign in. This asserts the
+    /// two states are the ones intended rather than an accident.
+    #[test]
+    fn the_github_app_is_either_configured_or_says_it_is_not() {
+        match (GITHUB_CLIENT_ID.is_empty(), GITHUB_APP_SLUG.is_empty()) {
+            (true, true) => {
+                assert!(
+                    github_install_url().is_err(),
+                    "an unconfigured build must refuse rather than send players to a broken URL"
+                );
+                assert!(require_client_id().is_err());
+            }
+            (false, false) => {
+                assert_eq!(
+                    github_install_url().expect("a configured build has an install URL"),
+                    format!("https://github.com/apps/{GITHUB_APP_SLUG}/installations/new")
+                );
+                assert!(
+                    GITHUB_CLIENT_ID.starts_with("Iv23"),
+                    "GitHub App client IDs start with Iv23; {GITHUB_CLIENT_ID} looks like an OAuth app, \
+                     which would ask for access to every repository"
+                );
+            }
+            _ => panic!(
+                "half-configured build: client id {:?}, slug {:?}",
+                GITHUB_CLIENT_ID, GITHUB_APP_SLUG
+            ),
+        }
+    }
+
     #[test]
     fn a_credential_description_ends_with_a_blank_line() {
         let approve = credential_description("octocat", Some("ghp_secret"));
