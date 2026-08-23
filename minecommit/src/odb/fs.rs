@@ -61,8 +61,12 @@ fn assert_safe_key(key: &str) -> Result<()> {
 impl OdbReader for LocalFsOdb {
     fn get(&self, key: &str) -> Result<Vec<u8>> {
         assert_safe_key(key)?;
-        Ok(fs::read(self.root_dir.join(key_to_native(key)))
-            .context("failed to read file from odb")?)
+        let bytes = fs::read(self.root_dir.join(key_to_native(key)))
+            .context("failed to read file from odb")?;
+        // Every handler reaches a save file through here, including the
+        // parallel readers, so this is the one place that sees the whole job.
+        crate::progress::advance(1);
+        Ok(bytes)
     }
 
     fn get_par(&self, keys: &[&str]) -> Result<Vec<Vec<u8>>> {
@@ -99,6 +103,7 @@ impl OdbWriter for LocalFsOdb {
         }
         fs::write(&path, value)
             .with_context(|| format!("failed to write file to odb at {path:?}"))?;
+        crate::progress::advance(1);
         Ok(())
     }
 
@@ -116,6 +121,7 @@ impl OdbWriter for LocalFsOdb {
             }
             fs::write(&path, value)
                 .with_context(|| format!("failed to write file to odb at {path:?}"))?;
+            crate::progress::advance(1);
             Ok::<(), anyhow::Error>(())
         })
     }

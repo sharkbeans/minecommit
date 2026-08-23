@@ -10,6 +10,7 @@ use crate::{
 
 mod handler;
 pub mod odb;
+pub mod progress;
 pub mod sync;
 pub mod utils;
 
@@ -72,10 +73,16 @@ impl Config {
             LocalGitOdb::new(self.storage_dir.to_owned())
         }?;
 
+        // Counted before any work starts so the bar has a denominator. This
+        // walks the save directory a second time, which costs seconds on a
+        // world whose backup costs minutes.
+        progress::begin(save.glob("**/*")?.len() as u64);
+
         let mut processed = HashSet::new();
         for crafter in CrafterImpl::get_crafters(self.extra_patterns, self.ignore_patterns) {
             processed.extend(crafter.flatten(&save, &mut git)?);
         }
+        progress::end();
 
         let unprocessed = save
             .glob("**/*")?
@@ -87,6 +94,7 @@ impl Config {
         // written loose Git objects, but without a commit or ref update they
         // are unreachable and no backup history advances.
         if !unprocessed.is_empty() {
+            progress::end();
             log::warn!(
                 "Found {} unhandled files; leaving the backup branch unchanged",
                 unprocessed.len()

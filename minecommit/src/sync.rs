@@ -1046,6 +1046,10 @@ mod tests {
     /// lock violation. It must therefore be ignored, not stored.
     #[test]
     fn backup_succeeds_while_holding_the_world_session_lock() {
+        // Backing up moves the process-wide progress counters.
+        let _progress = crate::progress::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         let save = dir.path().join("world");
         write_minimal_save(&save);
@@ -1078,6 +1082,10 @@ mod tests {
     /// session.lock for the duration of the restore.
     #[test]
     fn restore_over_an_existing_world_preserves_it_as_a_snapshot() {
+        // Backing up moves the process-wide progress counters.
+        let _progress = crate::progress::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         let save = dir.path().join("world");
         write_minimal_save(&save);

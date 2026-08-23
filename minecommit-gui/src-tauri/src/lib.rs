@@ -310,6 +310,35 @@ fn commit_blocking(
     }
 }
 
+/// How much of a backup or restore has been done, for the progress bar.
+#[derive(Debug, Clone, Copy, Serialize)]
+struct Progress {
+    done: u64,
+    total: u64,
+}
+
+/// Push whatever the running work has produced to the window: log lines, and
+/// how far it has got.
+///
+/// `reported` is the last count sent, so a job that spends a minute on one
+/// large region file does not emit the same number twenty times a second.
+fn pump(app: &tauri::AppHandle, reported: &mut (u64, u64)) {
+    for entry in &take_logs() {
+        let _ = app.emit("commit-log", entry);
+    }
+    let now = minecommit::progress::snapshot();
+    if now != *reported {
+        *reported = now;
+        let _ = app.emit(
+            "backup-progress",
+            Progress {
+                done: now.0,
+                total: now.1,
+            },
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn perform_commit(
@@ -326,6 +355,9 @@ async fn perform_commit(
 ) -> PerformCommitResult {
     init_logger();
     take_logs(); // drain stale logs from previous calls
+    // A restore or a download never sets a total, so without this the file
+    // count would carry over from whatever ran before it.
+    minecommit::progress::end();
 
     // Spawn a blocking thread to periodically drain and emit captured logs
     let running = Arc::new(AtomicBool::new(true));
@@ -333,18 +365,13 @@ async fn perform_commit(
     let app_clone = app.clone();
 
     let log_task = tauri::async_runtime::spawn_blocking(move || {
+        let mut reported = (0u64, 0u64);
         while running_clone.load(Ordering::Relaxed) {
-            let logs = take_logs();
-            for entry in &logs {
-                let _ = app_clone.emit("commit-log", entry);
-            }
+            pump(&app_clone, &mut reported);
             std::thread::sleep(Duration::from_millis(50));
         }
         // Drain remaining logs after commit finishes
-        let logs = take_logs();
-        for entry in &logs {
-            let _ = app_clone.emit("commit-log", entry);
-        }
+        pump(&app_clone, &mut reported);
     });
 
     // Run the heavy commit work on another blocking thread, streaming logs in real time
@@ -410,6 +437,7 @@ async fn perform_restore(
 ) -> PerformRestoreResult {
     init_logger();
     take_logs(); // drain stale logs
+    minecommit::progress::end();
 
     // Spawn a blocking thread to periodically drain and emit captured logs
     let running = Arc::new(AtomicBool::new(true));
@@ -417,17 +445,12 @@ async fn perform_restore(
     let app_clone = app.clone();
 
     let log_task = tauri::async_runtime::spawn_blocking(move || {
+        let mut reported = (0u64, 0u64);
         while running_clone.load(Ordering::Relaxed) {
-            let logs = take_logs();
-            for entry in &logs {
-                let _ = app_clone.emit("commit-log", entry);
-            }
+            pump(&app_clone, &mut reported);
             std::thread::sleep(Duration::from_millis(50));
         }
-        let logs = take_logs();
-        for entry in &logs {
-            let _ = app_clone.emit("commit-log", entry);
-        }
+        pump(&app_clone, &mut reported);
     });
 
     // Run the restore work on a blocking thread
@@ -495,23 +518,19 @@ async fn perform_push(
 ) -> PerformRestoreResult {
     init_logger();
     take_logs();
+    minecommit::progress::end();
 
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
     let app_clone = app.clone();
 
     let log_task = tauri::async_runtime::spawn_blocking(move || {
+        let mut reported = (0u64, 0u64);
         while running_clone.load(Ordering::Relaxed) {
-            let logs = take_logs();
-            for entry in &logs {
-                let _ = app_clone.emit("commit-log", entry);
-            }
+            pump(&app_clone, &mut reported);
             std::thread::sleep(Duration::from_millis(50));
         }
-        let logs = take_logs();
-        for entry in &logs {
-            let _ = app_clone.emit("commit-log", entry);
-        }
+        pump(&app_clone, &mut reported);
     });
 
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -561,23 +580,19 @@ async fn perform_pull(
 ) -> PerformRestoreResult {
     init_logger();
     take_logs();
+    minecommit::progress::end();
 
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
     let app_clone = app.clone();
 
     let log_task = tauri::async_runtime::spawn_blocking(move || {
+        let mut reported = (0u64, 0u64);
         while running_clone.load(Ordering::Relaxed) {
-            let logs = take_logs();
-            for entry in &logs {
-                let _ = app_clone.emit("commit-log", entry);
-            }
+            pump(&app_clone, &mut reported);
             std::thread::sleep(Duration::from_millis(50));
         }
-        let logs = take_logs();
-        for entry in &logs {
-            let _ = app_clone.emit("commit-log", entry);
-        }
+        pump(&app_clone, &mut reported);
     });
 
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -1050,6 +1065,7 @@ async fn clone_save_from_cloud(
 ) -> Result<CloneFromCloudResult, String> {
     init_logger();
     take_logs();
+    minecommit::progress::end();
 
     let name = name.trim().to_string();
     let save_path = save_path.trim().to_string();
@@ -1096,15 +1112,12 @@ async fn clone_save_from_cloud(
     let running_clone = running.clone();
     let app_clone = app.clone();
     let log_task = tauri::async_runtime::spawn_blocking(move || {
+        let mut reported = (0u64, 0u64);
         while running_clone.load(Ordering::Relaxed) {
-            for entry in &take_logs() {
-                let _ = app_clone.emit("commit-log", entry);
-            }
+            pump(&app_clone, &mut reported);
             std::thread::sleep(Duration::from_millis(50));
         }
-        for entry in &take_logs() {
-            let _ = app_clone.emit("commit-log", entry);
-        }
+        pump(&app_clone, &mut reported);
     });
 
     let repo_for_task = repo_path.clone();
@@ -1513,21 +1526,19 @@ async fn backup_and_upload(
 ) -> BackupResult {
     init_logger();
     take_logs();
+    minecommit::progress::end();
 
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
     let app_clone = app.clone();
 
     let log_task = tauri::async_runtime::spawn_blocking(move || {
+        let mut reported = (0u64, 0u64);
         while running_clone.load(Ordering::Relaxed) {
-            for entry in &take_logs() {
-                let _ = app_clone.emit("commit-log", entry);
-            }
+            pump(&app_clone, &mut reported);
             std::thread::sleep(Duration::from_millis(50));
         }
-        for entry in &take_logs() {
-            let _ = app_clone.emit("commit-log", entry);
-        }
+        pump(&app_clone, &mut reported);
     });
 
     let result = tauri::async_runtime::spawn_blocking(move || {
