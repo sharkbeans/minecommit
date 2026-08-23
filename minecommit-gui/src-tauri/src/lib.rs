@@ -1108,6 +1108,19 @@ async fn clone_save_from_cloud(
             });
         }
     };
+    // The download makes this directory and removes it again if anything goes
+    // wrong, so it must not already be something -- a world named
+    // "<name>.git" would otherwise be deleted by the cleanup.
+    if repo_path.exists() {
+        return Ok(CloneFromCloudResult {
+            success: false,
+            error: Some(format!(
+                "{} already exists. Move or rename it first, so nothing there can be lost.",
+                repo_path.display()
+            )),
+            save: None,
+        });
+    }
 
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
@@ -1139,7 +1152,12 @@ async fn clone_save_from_cloud(
         Ok(pair) => pair,
         Err(message) => {
             // Nothing was restored, so leave no half-created repository behind.
-            let _ = fs::remove_dir_all(&repo_path);
+            // Only if it really is the repository this attempt made, though: a
+            // world folder that happens to be named "<something>.git" would sit
+            // at exactly this path.
+            if assert_is_backup_repository(&repo_path).is_ok() {
+                let _ = fs::remove_dir_all(&repo_path);
+            }
             log::error!("{message}");
             return Ok(CloneFromCloudResult {
                 success: false,
@@ -1240,6 +1258,8 @@ fn delete_save(
         if let Some(save) = save {
             let repo_path = Path::new(&save.repo_path);
             if repo_path.exists() {
+                assert_is_backup_repository(repo_path)
+                    .map_err(|message| AppError::InvalidUTF8(message))?;
                 fs::remove_dir_all(repo_path)?;
             }
         }
@@ -1366,18 +1386,6 @@ fn directory_bytes(dir: &Path) -> u64 {
         .sum()
 }
 
-/// The world a snapshot folder was made from: "My World.1787384127276.snapshot"
-/// came from "My World".
-fn world_behind_snapshot(name: &str) -> String {
-    let stem = name.strip_suffix(".snapshot").unwrap_or(name);
-    // Drop the timestamp, and the disambiguating counter if there was one.
-    let mut parts: Vec<&str> = stem.split('.').collect();
-    while parts.len() > 1 && parts.last().is_some_and(|p| p.chars().all(|c| c.is_ascii_digit())) {
-        parts.pop();
-    }
-    parts.join(".")
-}
-
 /// The copies an earlier restore left in the saves folder.
 ///
 /// These hold a level.dat, so Minecraft lists every one of them in the game as a
@@ -1404,7 +1412,7 @@ async fn list_old_copies(folder: String) -> Result<Vec<OldCopy>, String> {
                 .ok()
                 .map(|time| DateTime::<Local>::from(time).to_rfc3339());
             copies.push(OldCopy {
-                world: world_behind_snapshot(&name),
+                world: snapshot_world(&name).unwrap_or_else(|| name.clone()),
                 path: path.to_string_lossy().to_string(),
                 taken,
                 bytes: directory_bytes(&path),
@@ -1419,24 +1427,62 @@ async fn list_old_copies(folder: String) -> Result<Vec<OldCopy>, String> {
 
 /// Refuse anything that is not one of our own snapshot folders inside `folder`.
 ///
-/// These commands take paths from the window, and the two of them between them
-/// move and delete whole worlds. A wrong path here is somebody's save.
-fn checked_snapshot(folder: &Path, path: &str) -> Result<PathBuf, String> {
+/// These commands take paths from the window, and between them they move and
+/// delete whole worlds. Everything below is a way somebody's save could end up
+/// on the wrong end of that, so each is checked rather than assumed.
+fn checked_snapshot(
+    folder: &Path,
+    tracked_worlds: &[PathBuf],
+    path: &str,
+) -> Result<PathBuf, String> {
     let path = PathBuf::from(path);
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
+
     if !is_restore_snapshot(&name) {
         return Err(format!("{name} is not a copy MineCommit made"));
     }
     if path.parent() != Some(folder) {
         return Err(format!("{name} is not in the saves folder"));
     }
-    if !path.is_dir() {
-        return Err(format!("{name} is no longer there"));
+
+    // symlink_metadata, not metadata: a link pointing at a real world reads as
+    // a directory through the link, and following it would delete the world at
+    // the other end instead of the link.
+    let meta = fs::symlink_metadata(&path).map_err(|_| format!("{name} is no longer there"))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("{name} is a shortcut to somewhere else, so it is left alone"));
+    }
+    if !meta.is_dir() {
+        return Err(format!("{name} is not a folder"));
+    }
+
+    // The last line of defence, and the one that does not depend on a name
+    // being parsed correctly: never touch a folder MineCommit is looking after
+    // as a world.
+    if tracked_worlds.iter().any(|world| world == &path) {
+        return Err(format!("{name} is a world MineCommit is tracking"));
+    }
+
+    // A copy holds a world, so a folder with no level.dat is not one of ours
+    // however it is named.
+    if !path.join("level.dat").is_file() {
+        return Err(format!("{name} does not hold a world"));
     }
     Ok(path)
+}
+
+/// The world folders MineCommit is looking after, for the guard above.
+fn tracked_world_paths(state: &tauri::State<AppState>) -> Vec<PathBuf> {
+    state
+        .saves
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|save| PathBuf::from(&save.path))
+        .collect()
 }
 
 /// Move copies out of the saves folder, so Minecraft stops listing them.
@@ -1444,7 +1490,12 @@ fn checked_snapshot(folder: &Path, path: &str) -> Result<PathBuf, String> {
 /// Moving rather than deleting by default: a copy is the world as it was before
 /// a restore, which can hold an afternoon that was never backed up anywhere.
 #[tauri::command]
-async fn tidy_old_copies(folder: String, paths: Vec<String>) -> Result<String, String> {
+async fn tidy_old_copies(
+    state: tauri::State<'_, AppState>,
+    folder: String,
+    paths: Vec<String>,
+) -> Result<String, String> {
+    let tracked = tracked_world_paths(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let saves = Path::new(&folder);
         let destination = saves
@@ -1456,7 +1507,7 @@ async fn tidy_old_copies(folder: String, paths: Vec<String>) -> Result<String, S
             .map_err(|e| format!("Could not make {}: {e}", destination.display()))?;
 
         for path in &paths {
-            let from = checked_snapshot(saves, path)?;
+            let from = checked_snapshot(saves, &tracked, path)?;
             let name = from.file_name().unwrap_or_default();
             let to = destination.join(name);
             fs::rename(&from, &to).map_err(|e| {
@@ -1471,12 +1522,17 @@ async fn tidy_old_copies(folder: String, paths: Vec<String>) -> Result<String, S
 
 /// Delete copies for good.
 #[tauri::command]
-async fn delete_old_copies(folder: String, paths: Vec<String>) -> Result<usize, String> {
+async fn delete_old_copies(
+    state: tauri::State<'_, AppState>,
+    folder: String,
+    paths: Vec<String>,
+) -> Result<usize, String> {
+    let tracked = tracked_world_paths(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let saves = Path::new(&folder);
         let mut removed = 0;
         for path in &paths {
-            let target = checked_snapshot(saves, path)?;
+            let target = checked_snapshot(saves, &tracked, path)?;
             fs::remove_dir_all(&target)
                 .map_err(|e| format!("Could not delete {}: {e}", target.display()))?;
             removed += 1;
@@ -1487,11 +1543,62 @@ async fn delete_old_copies(folder: String, paths: Vec<String>) -> Result<usize, 
     .map_err(|e| format!("Could not delete the old copies: {e}"))?
 }
 
-/// Whether a folder is a copy MineCommit set aside when restoring a world.
+/// Refuse to erase anything that is not a MineCommit backup repository.
 ///
-/// `next_snapshot_path` always ends these names with `.snapshot`.
+/// Two places delete a whole directory tree by a path that came from stored
+/// settings. Settings are a file on disk that anything could have written, and
+/// a repository path that somehow named a world would take the world with it.
+/// A bare repository has a HEAD and an objects directory; a Minecraft world has
+/// a level.dat and must never match.
+fn assert_is_backup_repository(path: &Path) -> Result<(), String> {
+    let name = path.display();
+    if path.join("level.dat").is_file() {
+        return Err(format!("{name} holds a world, not backups, so it was left alone"));
+    }
+    if !path.join("HEAD").is_file() || !path.join("objects").is_dir() {
+        return Err(format!("{name} is not a backup repository, so it was left alone"));
+    }
+    Ok(())
+}
+
+/// The world a copy was made from, if the name really is one of ours.
+///
+/// `next_snapshot_path` writes `<world>.<epoch millis>.snapshot`, with a small
+/// counter before `.snapshot` when two restores land in the same millisecond.
+///
+/// Matching on the `.snapshot` ending alone is not good enough. These names
+/// decide what gets hidden from the world list, and what `tidy_old_copies` and
+/// `delete_old_copies` are allowed to move and erase. A player who happens to
+/// name a world "Backup.snapshot" would have had it hidden from MineCommit and
+/// then offered up for deletion as clutter. Requiring the timestamp -- ten
+/// digits at least, which no one types by accident -- means only names this
+/// program actually produced can match.
+fn snapshot_world(name: &str) -> Option<String> {
+    let stem = name.strip_suffix(".snapshot")?;
+    let parts: Vec<&str> = stem.split('.').collect();
+
+    let is_stamp = |part: &str| part.len() >= 10 && part.bytes().all(|b| b.is_ascii_digit());
+    let is_counter =
+        |part: &str| !part.is_empty() && part.len() <= 3 && part.bytes().all(|b| b.is_ascii_digit());
+
+    let world = if parts.len() >= 2 && is_stamp(parts[parts.len() - 1]) {
+        &parts[..parts.len() - 1]
+    } else if parts.len() >= 3
+        && is_counter(parts[parts.len() - 1])
+        && is_stamp(parts[parts.len() - 2])
+    {
+        &parts[..parts.len() - 2]
+    } else {
+        return None;
+    };
+
+    let world = world.join(".");
+    if world.is_empty() { None } else { Some(world) }
+}
+
+/// Whether a folder is a copy MineCommit set aside when restoring a world.
 fn is_restore_snapshot(name: &str) -> bool {
-    name.ends_with(".snapshot")
+    snapshot_world(name).is_some()
 }
 
 /// One point in a world's history.
@@ -2486,45 +2593,117 @@ mod tests {
     }
 
     #[test]
-    fn the_world_behind_a_snapshot_name_is_recovered() {
-        assert_eq!(world_behind_snapshot("My World.1787384127276.snapshot"), "My World");
+    fn only_names_this_program_produced_count_as_copies() {
+        // Ours, and the world behind each one.
+        assert_eq!(
+            snapshot_world("My World.1787384127276.snapshot").as_deref(),
+            Some("My World")
+        );
         // A second restore in the same millisecond gets a counter as well.
-        assert_eq!(world_behind_snapshot("My World.1787384127276.1.snapshot"), "My World");
-        // Worlds are allowed dots of their own, and only trailing numbers go.
-        assert_eq!(world_behind_snapshot("v1.20 survival.1787384127276.snapshot"), "v1.20 survival");
+        assert_eq!(
+            snapshot_world("My World.1787384127276.1.snapshot").as_deref(),
+            Some("My World")
+        );
+        // Worlds are allowed dots of their own.
+        assert_eq!(
+            snapshot_world("v1.20 survival.1787384127276.snapshot").as_deref(),
+            Some("v1.20 survival")
+        );
+
+        // Not ours. Every one of these is somebody's world, and matching any of
+        // them would hide it from MineCommit and then offer it up for deletion.
+        for impostor in [
+            "Backup.snapshot",
+            "snapshot",
+            ".snapshot",
+            "My World.snapshot",
+            "Level.2.snapshot",
+            "1787384127276.snapshot",
+            "My World.1787384127276",
+            "My World.1787384127276.snapshot.backup",
+        ] {
+            assert_eq!(
+                snapshot_world(impostor),
+                None,
+                "{impostor:?} is not a copy MineCommit made"
+            );
+        }
     }
 
+    /// Everything `tidy_old_copies` and `delete_old_copies` are allowed to
+    /// touch passes through `checked_snapshot` first. These are the ways a real
+    /// world could reach it, and every one of them has to be turned away: a
+    /// mistake here does not corrupt a save, it erases one.
     #[test]
-    fn old_copies_can_only_be_moved_or_deleted_inside_the_saves_folder() {
-        // These two commands take paths from the window and between them move
-        // and delete whole worlds, so the guard is the safety property here.
+    fn nothing_but_our_own_copies_can_be_moved_or_deleted() {
         let saves = tempfile::tempdir().expect("tempdir");
         let elsewhere = tempfile::tempdir().expect("tempdir");
+        let world = |dir: &Path, name: &str| {
+            let path = dir.join(name);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("level.dat"), b"nbt").unwrap();
+            path
+        };
 
-        let copy = saves.path().join("My World.1787384127276.snapshot");
-        fs::create_dir(&copy).unwrap();
-        let real_world = saves.path().join("My World");
-        fs::create_dir(&real_world).unwrap();
-        let outside = elsewhere.path().join("Other.1787384127276.snapshot");
-        fs::create_dir(&outside).unwrap();
+        let copy = world(saves.path(), "My World.1787384127276.snapshot");
+        let real = world(saves.path(), "My World");
+        let outside = world(elsewhere.path(), "Other.1787384127276.snapshot");
+        let named_like_one = world(saves.path(), "Backup.snapshot");
+        let empty = saves.path().join("Hollow.1787384127276.snapshot");
+        fs::create_dir(&empty).unwrap();
 
+        let tracked = vec![real.clone()];
+        let ok = |p: &Path| checked_snapshot(saves.path(), &tracked, p.to_str().unwrap());
+
+        assert!(ok(&copy).is_ok(), "our own copy is the one thing allowed");
+
+        for (path, why) in [
+            (&real, "a tracked world must never be touched"),
+            (&outside, "a path outside the saves folder must be refused"),
+            (&named_like_one, "a world merely named like a copy must be refused"),
+            (&empty, "a folder holding no world is not a copy of one"),
+            (&saves.path().join("gone.1787384127276.snapshot"), "a copy already removed"),
+        ] {
+            assert!(ok(path).is_err(), "{why}: {}", path.display());
+        }
+
+        // A copy that is really a shortcut to a world elsewhere: following it
+        // would erase the world at the far end rather than the link.
+        #[cfg(unix)]
+        {
+            let link = saves.path().join("Sneaky.1787384127276.snapshot");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert!(
+                ok(&link).is_err(),
+                "a shortcut must not be followed to somebody's world"
+            );
+            assert!(real.join("level.dat").is_file(), "and the world is untouched");
+        }
+    }
+
+    /// Two commands erase a directory tree by a path read back from settings,
+    /// which is a file on disk that anything could have written.
+    #[test]
+    fn only_a_real_backup_repository_can_be_erased() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let repo = dir.path().join("world.git");
+        fs::create_dir_all(repo.join("objects")).unwrap();
+        fs::write(repo.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        assert!(assert_is_backup_repository(&repo).is_ok());
+
+        let world = dir.path().join("My World");
+        fs::create_dir_all(world.join("objects")).unwrap();
+        fs::write(world.join("HEAD"), b"decoy").unwrap();
+        fs::write(world.join("level.dat"), b"nbt").unwrap();
         assert!(
-            checked_snapshot(saves.path(), copy.to_str().unwrap()).is_ok(),
-            "our own copy in the saves folder is fair game"
+            assert_is_backup_repository(&world).is_err(),
+            "a level.dat means a world, whatever else the folder contains"
         );
-        assert!(
-            checked_snapshot(saves.path(), real_world.to_str().unwrap()).is_err(),
-            "a real world is not a copy and must never be touched"
-        );
-        assert!(
-            checked_snapshot(saves.path(), outside.to_str().unwrap()).is_err(),
-            "a path outside the saves folder must be refused"
-        );
-        assert!(
-            checked_snapshot(saves.path(), saves.path().join("gone.snapshot").to_str().unwrap())
-                .is_err(),
-            "a copy that has already been removed must be refused"
-        );
+
+        let neither = dir.path().join("photos");
+        fs::create_dir(&neither).unwrap();
+        assert!(assert_is_backup_repository(&neither).is_err());
     }
 
     #[test]

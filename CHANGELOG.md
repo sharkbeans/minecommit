@@ -14,6 +14,30 @@ Changes
   it does there is harmless. Asking on request costs a button press and makes no
   such bet.
 
+Safety
+
+An audit of every place MineCommit moves or erases a directory, and what each
+could be pointed at by a path that was wrong. None of these had been reported;
+all of them could have cost somebody a world.
+
+- A world named like one of MineCommit's own copies -- "Backup.snapshot", say --
+  was hidden from the world list and then offered up for deletion as clutter. A
+  copy is now recognised by the timestamp MineCommit actually writes, not by the
+  name merely ending in ".snapshot".
+- A shortcut named like a copy, pointing at a real world, would have had the
+  world at the far end erased rather than the shortcut itself.
+- Nothing now moves or erases a folder MineCommit is looking after as a world,
+  whatever its name looks like, nor one that holds no world at all.
+- Deleting the backups for a world checks that what it is about to erase really
+  is a backup repository. The path comes from a settings file, and a settings
+  file is something on disk that anything could have written.
+- Downloading a world refuses to start if the folder it would keep its backups
+  in already exists, because a world called "myworld.git" sits exactly there and
+  the cleanup after a failed download would have removed it.
+- A restore that cannot put the new world in place, and cannot move the original
+  back either, now names the folder the original is in and where to move it. It
+  said neither before, which is indistinguishable from having destroyed it.
+
 ## 0.11.1 (2026-08-23)
 
 Bug fixes

@@ -766,9 +766,20 @@ pub fn restore_commit(
 
     if let Err(error) = fs::rename(&staging_dir, save_dir) {
         if let Some(backup) = &backup_path {
-            let _ = fs::rename(backup, save_dir);
+            // The world is out of its usual place and the new one could not
+            // take it. Putting it back is the whole job now, and if even that
+            // fails the one thing that must not happen is the player being left
+            // to guess where their world went.
+            if let Err(rollback) = fs::rename(backup, save_dir) {
+                return Err(error).context(format!(
+                    "could not put the restored world in place, and could not move the \
+                     original back either ({rollback}). The original world is safe at \
+                     {backup:?} -- move that folder back to {save_dir:?} to recover it."
+                ));
+            }
         }
-        return Err(error).context("failed to activate reconstructed Minecraft save");
+        return Err(error)
+            .context("failed to activate reconstructed Minecraft save; the original is unchanged");
     }
     staging.keep = true;
     Ok(RestoreResult { backup_path })
@@ -868,13 +879,20 @@ fn move_world_aside(save_dir: &Path, git_dir: &Path) -> Result<PathBuf> {
     match fs::rename(save_dir, &backup) {
         Ok(()) => Ok(backup),
         Err(error) => {
-            let beside = save_dir.with_extension(format!(
-                "{}.snapshot",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-            ));
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let name = save_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("world");
+            // Joined onto the name rather than set as an extension: a world
+            // called "v1.20" would otherwise come back as "v1.<stamp>".
+            let beside = match save_dir.parent() {
+                Some(parent) => parent.join(format!("{name}.{stamp}.snapshot")),
+                None => save_dir.with_extension(format!("{stamp}.snapshot")),
+            };
             log::warn!(
                 "Could not move the old world to {backup:?} ({error}); keeping it at {beside:?}"
             );
@@ -910,16 +928,35 @@ mod tests {
         String::from_utf8(output.stdout).expect("git stdout utf-8")
     }
 
-    fn init_bare() -> TempDir {
-        let dir = tempfile::tempdir().expect("tempdir");
+    /// A bare repository nested inside its own temporary directory.
+    ///
+    /// Nested, not at the root of it: a restore keeps the world it replaces in
+    /// a `snapshots` folder beside the repository, and a repository sitting
+    /// directly in the system temp directory would put those in a shared
+    /// `/tmp/snapshots` that outlives the test.
+    struct TestRepo {
+        _root: TempDir,
+        path: PathBuf,
+    }
+
+    impl TestRepo {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    fn init_bare() -> TestRepo {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("minecommit").join("world.git");
+        fs::create_dir_all(path.parent().expect("parent")).expect("make repo parent");
         let output = Command::new("git")
-            .args(["init", "--bare", dir.path().to_str().expect("utf8 path")])
+            .args(["init", "--bare", path.to_str().expect("utf8 path")])
             .output()
             .expect("git init");
         assert!(output.status.success());
-        git(dir.path(), &["config", "user.name", "MineCommit Test"]);
-        git(dir.path(), &["config", "user.email", "test@example.com"]);
-        dir
+        git(&path, &["config", "user.name", "MineCommit Test"]);
+        git(&path, &["config", "user.email", "test@example.com"]);
+        TestRepo { _root: root, path }
     }
 
     fn commit(repo: &Path, parent: Option<&str>, message: &str) -> String {
@@ -1286,6 +1323,68 @@ mod tests {
         // session.lock is deliberately not stored or restored; Minecraft
         // recreates it the next time the world is opened.
         assert!(!save.join("session.lock").exists());
+    }
+
+    /// A restore that cannot finish must leave the world either where it was
+    /// or somewhere the error names. Anything else is indistinguishable from
+    /// having destroyed somebody's save.
+    #[cfg(unix)]
+    #[test]
+    fn a_restore_that_fails_never_loses_the_world() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _progress = crate::progress::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let saves = tempfile::tempdir().expect("tempdir");
+        let save = saves.path().join("world");
+        write_minimal_save(&save);
+        let repo = init_bare();
+        Config::new(save.clone(), repo.path().to_path_buf(), vec![], vec![])
+            .commit(
+                vec![],
+                "backup",
+                Some("refs/heads/main".to_string()),
+                Some("MineCommit Test"),
+                Some("test@example.com"),
+            )
+            .expect("commit save");
+        let head = git(repo.path(), &["rev-parse", "refs/heads/main"])
+            .trim()
+            .to_string();
+
+        // Sealing the saves directory makes putting anything back into it fail,
+        // which is the only way to reach the branch under test.
+        let sealed = fs::Permissions::from_mode(0o500);
+        let original = fs::metadata(saves.path()).unwrap().permissions();
+        fs::set_permissions(saves.path(), sealed).unwrap();
+        let outcome = restore_commit(&save, repo.path(), &head);
+        fs::set_permissions(saves.path(), original).unwrap();
+
+        let error = format!("{:#}", outcome.expect_err("the restore cannot succeed here"));
+
+        // The copy is outside the sealed directory, so the world did move -- and
+        // that is exactly the situation the message must explain.
+        let kept = snapshot_dir(repo.path())
+            .map(|dir| {
+                fs::read_dir(dir)
+                    .map(|entries| entries.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+                    .unwrap_or_else(|_| Vec::new())
+            })
+            .unwrap_or_default();
+        let Some(kept) = kept.into_iter().find(|path| path.join("level.dat").is_file()) else {
+            // The world never moved, so nothing was at risk and no message is
+            // owed. That is the other acceptable outcome.
+            assert!(save.join("level.dat").is_file(), "the world must still exist");
+            return;
+        };
+
+        assert!(
+            error.contains(&kept.display().to_string())
+                || error.contains(kept.file_name().unwrap().to_str().unwrap()),
+            "the error must name where the world was kept.\nerror: {error}\nworld: {kept:?}"
+        );
     }
 
     #[test]
