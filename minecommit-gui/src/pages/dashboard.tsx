@@ -66,15 +66,6 @@ const DEFAULT_NOTE = "Backup"
 
 type Busy = "backup" | "latest" | "restore" | null
 
-/**
- * How often every world is re-checked against GitHub.
- *
- * Often enough that the list is still true after a session of play, rare enough
- * that a folder of worlds is not a stream of requests: one round trip per world
- * per interval.
- */
-const RECHECK_MS = 3 * 60 * 1000
-
 interface Outcome {
   tone: "good" | "warn" | "bad"
   title: TranslationKey
@@ -141,10 +132,6 @@ export function DashboardPage() {
   const [logFinished, setLogFinished] = useState(false)
   const [operation, setOperation] = useState<Operation>("commit")
   const unlisteners = useRef<Array<() => void>>([])
-  // Read by the re-check timer, which must not be torn down and rebuilt every
-  // time a world list or a button changes.
-  const savesRef = useRef(saves)
-  const busyRef = useRef<Busy>(null)
   const checkingRef = useRef(false)
 
   const [addOpen, setAddOpen] = useState(false)
@@ -258,24 +245,21 @@ export function DashboardPage() {
 
   /* Checking every world ------------------------------------------------ */
 
-  useEffect(() => {
-    savesRef.current = saves
-  }, [saves])
-  useEffect(() => {
-    busyRef.current = busy
-  }, [busy])
-
+  // Only ever when asked. This used to run on a timer, which meant MineCommit
+  // reached into every world every few minutes for as long as it was open --
+  // and the first thing that turned out to be wrong with what it did there was
+  // wrong once every three minutes, all evening, instead of once.
+  //
   // One world at a time: each cloud check is a round trip to GitHub, and firing
   // them together on a ten-world folder is a burst of authenticated requests
-  // for no gain -- nothing is waiting on the answer.
+  // for no gain, since nothing is waiting on the answer.
   const checkEveryWorld = useCallback(async () => {
-    // The timer and the button call the same thing, and a slow round of checks
-    // can still be running when the next one is due.
+    // A slow round can still be going when the button is pressed again.
     if (checkingRef.current) return
     checkingRef.current = true
     setChecking(true)
     try {
-      for (const save of savesRef.current) {
+      for (const save of saves) {
         await readStatus(save, true)
         await readWorldState(save)
       }
@@ -284,20 +268,7 @@ export function DashboardPage() {
       checkingRef.current = false
       setChecking(false)
     }
-  }, [readStatus, readWorldState])
-
-  // The badges answer "is this world safe?", and an answer from when the app
-  // opened stops being one after an evening of play. Re-check on a timer so the
-  // list is true without anyone having to ask it to be.
-  useEffect(() => {
-    const timer = setInterval(() => {
-      // A backup in flight is already changing everything this would read, and
-      // a hidden window has nobody reading the badges.
-      if (busyRef.current !== null || document.hidden) return
-      void checkEveryWorld()
-    }, RECHECK_MS)
-    return () => clearInterval(timer)
-  }, [checkEveryWorld])
+  }, [readStatus, readWorldState, saves])
 
   const refreshSelected = useCallback(async () => {
     if (!selectedSave) return
