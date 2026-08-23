@@ -705,16 +705,12 @@ pub fn restore_commit(
         .context("restored commit did not produce a valid Minecraft Java save")?;
 
     let backup_path = if existing_world {
-        let backup = next_snapshot_path(save_dir)?;
         // Windows refuses to rename a directory while any handle inside it is
         // still open, and MineCommit's own session.lock handle lives in this
         // one. The reconstruction above is finished, so release the lock first;
         // the world is about to be moved aside regardless.
         drop(world_lock.take());
-        fs::rename(save_dir, &backup).with_context(|| {
-            format!("failed to preserve existing Minecraft save at {save_dir:?} as {backup:?}")
-        })?;
-        Some(backup)
+        Some(move_world_aside(save_dir, git_dir)?)
     } else {
         None
     };
@@ -769,22 +765,77 @@ fn create_staging_dir(save_dir: &Path) -> Result<PathBuf> {
     anyhow::bail!("could not create a unique restore staging directory near {save_dir:?}")
 }
 
-fn next_snapshot_path(save_dir: &Path) -> Result<PathBuf> {
+/// Where a world goes when a restore replaces it.
+///
+/// Not beside the world it came from. Minecraft lists every folder in the saves
+/// directory that holds a level.dat, so a copy left there turns up in the game's
+/// own world list -- and a list of near-identical names differing only by a Unix
+/// timestamp is worse than useless when you are trying to pick which one to
+/// play. The backup repositories already live outside the saves folder, so the
+/// copies go next to them.
+fn snapshot_dir(git_dir: &Path) -> Option<PathBuf> {
+    Some(git_dir.parent()?.join("snapshots"))
+}
+
+/// A free path for the copy, and the directory it lives in.
+fn next_snapshot_path(save_dir: &Path, git_dir: &Path) -> Result<PathBuf> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let base = save_dir.with_extension(format!("{stamp}.snapshot"));
-    if !base.exists() {
-        return Ok(base);
-    }
-    for attempt in 1..100 {
-        let candidate = save_dir.with_extension(format!("{stamp}.{attempt}.snapshot"));
+    let name = save_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("world");
+
+    // Falling back beside the world is the old behaviour, and it is still
+    // better than refusing to restore because a directory could not be made.
+    let outside = snapshot_dir(git_dir).filter(|dir| fs::create_dir_all(dir).is_ok());
+
+    for attempt in 0..100 {
+        let suffix = if attempt == 0 {
+            format!("{stamp}.snapshot")
+        } else {
+            format!("{stamp}.{attempt}.snapshot")
+        };
+        let candidate = match &outside {
+            Some(dir) => dir.join(format!("{name}.{suffix}")),
+            None => save_dir.with_extension(&suffix),
+        };
         if !candidate.exists() {
             return Ok(candidate);
         }
     }
     anyhow::bail!("could not create a unique snapshot path for {save_dir:?}")
+}
+
+/// Move the world out of the way, keeping it whole.
+///
+/// The copy normally lands on the same drive as the saves folder, so this is a
+/// rename. When it is not -- saves symlinked to another disk, say -- a rename
+/// across filesystems fails, and losing the player's world to that would be
+/// unforgivable, so fall back to leaving it beside the world as before.
+fn move_world_aside(save_dir: &Path, git_dir: &Path) -> Result<PathBuf> {
+    let backup = next_snapshot_path(save_dir, git_dir)?;
+    match fs::rename(save_dir, &backup) {
+        Ok(()) => Ok(backup),
+        Err(error) => {
+            let beside = save_dir.with_extension(format!(
+                "{}.snapshot",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            ));
+            log::warn!(
+                "Could not move the old world to {backup:?} ({error}); keeping it at {beside:?}"
+            );
+            fs::rename(save_dir, &beside).with_context(|| {
+                format!("failed to preserve existing Minecraft save at {save_dir:?}")
+            })?;
+            Ok(beside)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1115,6 +1166,12 @@ mod tests {
 
         let backup = result.backup_path.expect("existing world must be preserved");
         assert!(backup.join("level.dat").is_file(), "snapshot keeps old save");
+        // The copy holds a level.dat, so anywhere inside the saves folder means
+        // Minecraft lists it in the game as a world of its own.
+        assert!(
+            !backup.starts_with(dir.path()),
+            "the old world was kept at {backup:?}, inside the saves folder"
+        );
         assert!(save.join("level.dat").is_file(), "world was restored");
         // session.lock is deliberately not stored or restored; Minecraft
         // recreates it the next time the world is opened.
