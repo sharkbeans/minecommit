@@ -3,6 +3,7 @@ use log::{LevelFilter, Log, Metadata, Record};
 use minecommit::{
     sync::{
         backup_message_with_device, current_device_name, lock_inactive_world, restore_commit,
+        world_is_busy,
         RemoteStatus, RemoteSync, DEFAULT_BRANCH,
     },
     utils::cmd::{git_cmd, git_command, git_count_objects, git_repack, repack_is_worthwhile},
@@ -1568,10 +1569,11 @@ fn device_name() -> String {
 /// its backups.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldState {
-    /// False while Minecraft still has the world open. This is the same
-    /// session.lock check the backup performs, so the dashboard cannot promise
-    /// something the button will then refuse to do.
-    pub idle: bool,
+    /// False while Minecraft still has the world open, and `None` when that
+    /// cannot be answered without taking the lock -- which is never worth doing
+    /// for a badge, because holding it is what makes Minecraft drop the world
+    /// from its own list. The backup still checks properly before it runs.
+    pub idle: Option<bool>,
     /// When level.dat was last written, ISO 8601. Compared against the newest
     /// backup to tell whether the world has been played since.
     pub last_played: Option<String>,
@@ -1581,7 +1583,10 @@ pub struct WorldState {
 fn world_state(save_dir: String) -> WorldState {
     let dir = Path::new(&save_dir);
     WorldState {
-        idle: lock_inactive_world(dir).is_ok(),
+        // Asked, never taken. This runs on a timer for every world, and holding
+        // session.lock -- even for an instant -- makes Minecraft drop the world
+        // from the list it shows in the game.
+        idle: world_is_busy(dir).map(|busy| !busy),
         last_played: fs::metadata(dir.join("level.dat"))
             .and_then(|meta| meta.modified())
             .ok()
@@ -2454,6 +2459,32 @@ mod tests {
         );
     }
 
+    /// Acquiring session.lock is right when a backup is about to hold it
+    /// anyway, and wrong for anything that merely reports state: while
+    /// MineCommit holds the lock, Minecraft cannot take it, and Minecraft drops
+    /// a world it cannot lock from the list it shows in the game. `world_state`
+    /// runs on a timer for every world, so this must stay a question, not a
+    /// claim.
+    #[test]
+    fn reporting_a_world_state_never_takes_its_lock() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("fn world_state(")
+            .expect("world_state must exist");
+        let body = &source[start..];
+        let end = body.find("\n}\n").expect("world_state must end");
+        let body = &body[..end];
+
+        assert!(
+            !body.contains("lock_inactive_world"),
+            "world_state acquires the session lock again:\n{body}"
+        );
+        assert!(
+            body.contains("world_is_busy"),
+            "world_state should ask with world_is_busy"
+        );
+    }
+
     #[test]
     fn the_world_behind_a_snapshot_name_is_recovered() {
         assert_eq!(world_behind_snapshot("My World.1787384127276.snapshot"), "My World");
@@ -2509,7 +2540,11 @@ mod tests {
         fs::write(save.path().join("level.dat"), b"nbt").unwrap();
 
         let state = world_state(save.path().to_string_lossy().to_string());
-        assert!(state.idle, "a world with no session.lock is not in use");
+        assert_eq!(
+            state.idle,
+            Some(true),
+            "a world with no session.lock is not in use"
+        );
         assert!(state.last_played.is_some());
     }
 

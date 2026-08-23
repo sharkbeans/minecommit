@@ -646,6 +646,54 @@ fn try_lock_minecraft_session(file: &File, lock_path: &Path, save_dir: &Path) ->
     }
 }
 
+/// Whether Minecraft currently has this world open -- asked, not taken.
+///
+/// `lock_inactive_world` answers the same question by acquiring the lock, which
+/// is right when a backup is about to start and about to hold it anyway. It is
+/// wrong for drawing a badge: while MineCommit holds the lock, Minecraft cannot
+/// take it, and Minecraft drops a world it cannot lock from the list it shows in
+/// the game. Asking every world every few minutes turned that into worlds
+/// vanishing from the game while MineCommit sat idle.
+///
+/// `None` means the question could not be answered without taking the lock, so
+/// the caller should say nothing rather than guess. A backup still refuses to
+/// run on an open world; that path does acquire the lock, correctly.
+pub fn world_is_busy(save_dir: impl AsRef<Path>) -> Option<bool> {
+    let lock_path = save_dir.as_ref().join("session.lock");
+    if !lock_path.exists() {
+        // Minecraft writes session.lock as it opens a world, so its absence
+        // means nothing has the world open.
+        return Some(false);
+    }
+    // Read-only: no writable handle to a file another program is relying on.
+    let file = File::open(&lock_path).ok()?;
+    conflicting_lock_holder(&file)
+}
+
+#[cfg(unix)]
+fn conflicting_lock_holder(file: &File) -> Option<bool> {
+    use std::os::fd::AsRawFd;
+
+    // F_GETLK exists for exactly this: it reports whether the lock *would*
+    // conflict, and takes nothing. Java's FileChannel locks -- Minecraft's
+    // included -- are in this same fcntl family, so this sees them.
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = libc::F_WRLCK as _;
+    lock.l_whence = libc::SEEK_SET as _;
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) } != 0 {
+        return None;
+    }
+    // F_GETLK sets l_type to F_UNLCK when nothing would block the lock.
+    Some(lock.l_type != libc::F_UNLCK as _)
+}
+
+#[cfg(not(unix))]
+fn conflicting_lock_holder(_file: &File) -> Option<bool> {
+    // Windows has no way to test a lock without taking it, and taking it is the
+    // bug. Say nothing: the backup itself still checks, and refuses.
+    None
+}
+
 /// Validate the minimal on-disk identity of an ordinary Minecraft Java save.
 pub fn validate_minecraft_save(save_dir: impl AsRef<Path>) -> Result<()> {
     let save_dir = save_dir.as_ref();
@@ -1095,6 +1143,68 @@ mod tests {
     /// Minecraft is not running. On Windows that lock is mandatory, so any
     /// attempt to also read session.lock as part of the backup fails with a
     /// lock violation. It must therefore be ignored, not stored.
+    /// The lock a world reports must be asked about, never taken: while
+    /// MineCommit holds session.lock, Minecraft cannot, and Minecraft drops a
+    /// world it cannot lock from the list it shows in the game.
+    ///
+    /// POSIX record locks never conflict with other locks held by the *same*
+    /// process, so this has to be a separate one. Python's `fcntl.lockf` uses
+    /// the same lock family as Java, which is what Minecraft is.
+    #[cfg(unix)]
+    #[test]
+    fn a_world_minecraft_has_open_is_seen_without_taking_its_lock() {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let save = dir.path().join("world");
+        write_minimal_save(&save);
+        let lock_path = save.join("session.lock");
+
+        assert_eq!(
+            world_is_busy(&save),
+            Some(false),
+            "nothing holds the lock yet"
+        );
+
+        // Stands in for Minecraft: take the lock, say so, then wait to be killed.
+        let mut minecraft = Command::new("python3")
+            .arg("-c")
+            .arg(
+                "import fcntl,sys,time\n\
+                 f=open(sys.argv[1],'r+')\n\
+                 fcntl.lockf(f,fcntl.LOCK_EX)\n\
+                 sys.stdout.write('locked')\n\
+                 sys.stdout.flush()\n\
+                 time.sleep(30)\n",
+            )
+            .arg(&lock_path)
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("python3 is needed to stand in for Minecraft");
+
+        let mut ready = [0u8; 6];
+        minecraft
+            .stdout
+            .as_mut()
+            .expect("stdout")
+            .read_exact(&mut ready)
+            .expect("the stand-in should report that it holds the lock");
+
+        let seen = world_is_busy(&save);
+        let refused = lock_inactive_world(&save).is_err();
+
+        let _ = minecraft.kill();
+        let _ = minecraft.wait();
+
+        assert_eq!(seen, Some(true), "an open world must be reported as busy");
+        assert!(refused, "and a backup must still refuse to run on it");
+
+        // With the stand-in gone the world reads as free again, which proves the
+        // check above left nothing of its own behind.
+        assert_eq!(world_is_busy(&save), Some(false));
+    }
+
     #[test]
     fn backup_succeeds_while_holding_the_world_session_lock() {
         // Backing up moves the process-wide progress counters.

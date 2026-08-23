@@ -72,7 +72,8 @@ export interface FoundWorld {
 }
 
 export interface WorldState {
-  idle: boolean
+  /** Null when it could not be answered without taking Minecraft's lock. */
+  idle: boolean | null
   last_played: string | null
 }
 
@@ -151,8 +152,10 @@ export function situationOf(
   if (!status) return "checking"
 
   // Minecraft holding the world open blocks a backup but not a diagnosis, so
-  // it only overrides the states whose action is to back up.
-  const busy = world ? !world.idle : false
+  // it only overrides the states whose action is to back up. Unknown is not
+  // "open": the backup checks properly before it runs, and claiming a world is
+  // in use when nobody knows would hide the button for no reason.
+  const busy = world?.idle === false
 
   switch (status.state) {
     case "not_configured":
