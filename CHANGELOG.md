@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.11.0 (2026-08-23)
+
+Going back to an earlier backup keeps the world it replaced, and until now it
+kept it right beside the original. Minecraft lists every folder in the saves
+directory that holds a level.dat, so each of those copies turned up in the game
+as a world of its own, with names differing only by a Unix timestamp. Choosing
+what to play became a guessing game.
+
+Fixes
+
+- Copies are now kept next to the backup repositories, outside the saves folder,
+  so Minecraft never sees them. If the saves folder is on a different drive to
+  the repositories, where moving between them is not possible, the copy stays
+  beside the world as before rather than the restore failing over where its
+  safety copy goes.
+- The copies already among your worlds can be cleared from the app. A banner
+  counts them, and a dialog lists each one with the world it came from, when it
+  was set aside, and what it takes up. Moving them out is the offered action and
+  deleting is the second one: a copy is the world as it was before a restore, so
+  it can hold play time that was never backed up anywhere else.
+
 ## 0.10.0 (2026-08-23)
 
 New
