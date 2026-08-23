@@ -25,6 +25,7 @@ import { RollingLogDialog, type Operation } from "@/components/rolling-log"
 import type { LogLine } from "@/components/log-viewer"
 import {
   AddWorldDialog,
+  OldCopiesDialog,
   RemoveWorldDialog,
   RestorePointDialog,
   SettingsDialog,
@@ -54,6 +55,7 @@ import {
   type BackupResult,
   type CloudStatus,
   type HistoryEntry,
+  type OldCopy,
   type Situation,
   type WorldState,
 } from "@/lib/cloud"
@@ -152,6 +154,8 @@ export function DashboardPage() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [signInOpen, setSignInOpen] = useState(false)
   const [guideOpen, setGuideOpen] = useState(false)
+  const [copiesOpen, setCopiesOpen] = useState(false)
+  const [oldCopies, setOldCopies] = useState(0)
 
   /* Saves folder ------------------------------------------------------- */
 
@@ -167,6 +171,20 @@ export function DashboardPage() {
       .catch(() => setAccount(null))
       .finally(() => setAccountLoaded(true))
   }, [])
+
+  // Restores before 0.11 left the world they replaced beside the original,
+  // where Minecraft lists it as a world of its own. Nothing else in the app
+  // would ever mention them, so they have to be looked for.
+  const countOldCopies = useCallback((folder: string) => {
+    if (!folder) return
+    invoke<OldCopy[]>("list_old_copies", { folder })
+      .then((found) => setOldCopies(found.length))
+      .catch(() => setOldCopies(0))
+  }, [])
+
+  useEffect(() => {
+    countOldCopies(savesFolder)
+  }, [countOldCopies, savesFolder])
 
   const changeSavesFolder = useCallback((folder: string) => {
     setSavesFolder(folder)
@@ -559,6 +577,18 @@ export function DashboardPage() {
         </div>
       </header>
 
+      {oldCopies > 0 && (
+        <div className="flex shrink-0 items-center gap-3 border-b bg-amber-500/10 px-4 py-2 text-sm">
+          <AlertTriangle className="size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <span className="min-w-0 flex-1 truncate">
+            {t("oldCopies.banner", { count: oldCopies })}
+          </span>
+          <Button size="sm" variant="outline" onClick={() => setCopiesOpen(true)}>
+            {t("oldCopies.review")}
+          </Button>
+        </div>
+      )}
+
       <div className="flex min-h-0 flex-1">
         <nav className="flex w-60 shrink-0 flex-col border-r">
           <p className="px-4 pt-4 pb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
@@ -822,6 +852,13 @@ export function DashboardPage() {
           // to connect a world, so carry them back to that.
           if (selectedSave && !selectedSave.remote_repo_path) setConnectOpen(true)
         }}
+      />
+      <OldCopiesDialog
+        key={`copiesOpen-${copiesOpen}`}
+        open={copiesOpen}
+        onOpenChange={setCopiesOpen}
+        savesFolder={savesFolder}
+        onCleared={() => countOldCopies(savesFolder)}
       />
       <GuideDialog
         key={`guideOpen-${guideOpen}`}

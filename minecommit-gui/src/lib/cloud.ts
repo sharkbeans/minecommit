@@ -45,6 +45,26 @@ export function asRepositoryName(world: string) {
   )
 }
 
+/** A world copy an earlier restore left in the saves folder. */
+export interface OldCopy {
+  world: string
+  path: string
+  taken: string | null
+  bytes: number
+}
+
+/** "4.2 GB" -- coarse on purpose; the point is whether it is worth clearing. */
+export function fileSize(bytes: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"]
+  let size = bytes
+  let unit = 0
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024
+    unit += 1
+  }
+  return `${size < 10 && unit > 0 ? size.toFixed(1) : Math.round(size)} ${units[unit]}`
+}
+
 export interface FoundWorld {
   name: string
   path: string

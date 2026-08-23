@@ -1338,6 +1338,154 @@ fn list_worlds_in_folder(folder: String) -> Result<Vec<FoundWorld>, String> {
     Ok(worlds)
 }
 
+/// A world copy an earlier restore left sitting in the saves folder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OldCopy {
+    /// The world it was made from, without the timestamp.
+    pub world: String,
+    pub path: String,
+    /// When the copy was set aside.
+    pub taken: Option<String>,
+    pub bytes: u64,
+}
+
+/// Add up everything under a directory. A world is mostly small region files,
+/// so this is thousands of metadata reads rather than any real I/O.
+fn directory_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => directory_bytes(&entry.path()),
+            Ok(_) => entry.metadata().map(|meta| meta.len()).unwrap_or(0),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+/// The world a snapshot folder was made from: "My World.1787384127276.snapshot"
+/// came from "My World".
+fn world_behind_snapshot(name: &str) -> String {
+    let stem = name.strip_suffix(".snapshot").unwrap_or(name);
+    // Drop the timestamp, and the disambiguating counter if there was one.
+    let mut parts: Vec<&str> = stem.split('.').collect();
+    while parts.len() > 1 && parts.last().is_some_and(|p| p.chars().all(|c| c.is_ascii_digit())) {
+        parts.pop();
+    }
+    parts.join(".")
+}
+
+/// The copies an earlier restore left in the saves folder.
+///
+/// These hold a level.dat, so Minecraft lists every one of them in the game as a
+/// world of its own -- which is why they have to be findable and clearable from
+/// here rather than left for the player to work out in a file manager.
+#[tauri::command]
+async fn list_old_copies(folder: String) -> Result<Vec<OldCopy>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = Path::new(&folder);
+        if !dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut copies = Vec::new();
+        for entry in fs::read_dir(dir).map_err(|e| format!("Could not read {folder}: {e}"))? {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !path.is_dir() || !is_restore_snapshot(&name) {
+                continue;
+            }
+            let taken = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .map(|time| DateTime::<Local>::from(time).to_rfc3339());
+            copies.push(OldCopy {
+                world: world_behind_snapshot(&name),
+                path: path.to_string_lossy().to_string(),
+                taken,
+                bytes: directory_bytes(&path),
+            });
+        }
+        copies.sort_by(|a, b| b.taken.cmp(&a.taken));
+        Ok(copies)
+    })
+    .await
+    .map_err(|e| format!("Could not look for old copies: {e}"))?
+}
+
+/// Refuse anything that is not one of our own snapshot folders inside `folder`.
+///
+/// These commands take paths from the window, and the two of them between them
+/// move and delete whole worlds. A wrong path here is somebody's save.
+fn checked_snapshot(folder: &Path, path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(path);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if !is_restore_snapshot(&name) {
+        return Err(format!("{name} is not a copy MineCommit made"));
+    }
+    if path.parent() != Some(folder) {
+        return Err(format!("{name} is not in the saves folder"));
+    }
+    if !path.is_dir() {
+        return Err(format!("{name} is no longer there"));
+    }
+    Ok(path)
+}
+
+/// Move copies out of the saves folder, so Minecraft stops listing them.
+///
+/// Moving rather than deleting by default: a copy is the world as it was before
+/// a restore, which can hold an afternoon that was never backed up anywhere.
+#[tauri::command]
+async fn tidy_old_copies(folder: String, paths: Vec<String>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let saves = Path::new(&folder);
+        let destination = saves
+            .parent()
+            .unwrap_or(saves)
+            .join("minecommit")
+            .join("snapshots");
+        fs::create_dir_all(&destination)
+            .map_err(|e| format!("Could not make {}: {e}", destination.display()))?;
+
+        for path in &paths {
+            let from = checked_snapshot(saves, path)?;
+            let name = from.file_name().unwrap_or_default();
+            let to = destination.join(name);
+            fs::rename(&from, &to).map_err(|e| {
+                format!("Could not move {} out of the saves folder: {e}", name.to_string_lossy())
+            })?;
+        }
+        Ok(destination.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("Could not move the old copies: {e}"))?
+}
+
+/// Delete copies for good.
+#[tauri::command]
+async fn delete_old_copies(folder: String, paths: Vec<String>) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let saves = Path::new(&folder);
+        let mut removed = 0;
+        for path in &paths {
+            let target = checked_snapshot(saves, path)?;
+            fs::remove_dir_all(&target)
+                .map_err(|e| format!("Could not delete {}: {e}", target.display()))?;
+            removed += 1;
+        }
+        Ok(removed)
+    })
+    .await
+    .map_err(|e| format!("Could not delete the old copies: {e}"))?
+}
+
 /// Whether a folder is a copy MineCommit set aside when restoring a world.
 ///
 /// `next_snapshot_path` always ends these names with `.snapshot`.
@@ -2189,6 +2337,9 @@ pub fn run() {
             clone_save_from_cloud,
             default_saves_folder,
             list_worlds_in_folder,
+            list_old_copies,
+            tidy_old_copies,
+            delete_old_copies,
             list_history,
             device_name,
             world_state,
@@ -2300,6 +2451,48 @@ mod tests {
         assert_eq!(
             worlds.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(),
             vec!["My World"]
+        );
+    }
+
+    #[test]
+    fn the_world_behind_a_snapshot_name_is_recovered() {
+        assert_eq!(world_behind_snapshot("My World.1787384127276.snapshot"), "My World");
+        // A second restore in the same millisecond gets a counter as well.
+        assert_eq!(world_behind_snapshot("My World.1787384127276.1.snapshot"), "My World");
+        // Worlds are allowed dots of their own, and only trailing numbers go.
+        assert_eq!(world_behind_snapshot("v1.20 survival.1787384127276.snapshot"), "v1.20 survival");
+    }
+
+    #[test]
+    fn old_copies_can_only_be_moved_or_deleted_inside_the_saves_folder() {
+        // These two commands take paths from the window and between them move
+        // and delete whole worlds, so the guard is the safety property here.
+        let saves = tempfile::tempdir().expect("tempdir");
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+
+        let copy = saves.path().join("My World.1787384127276.snapshot");
+        fs::create_dir(&copy).unwrap();
+        let real_world = saves.path().join("My World");
+        fs::create_dir(&real_world).unwrap();
+        let outside = elsewhere.path().join("Other.1787384127276.snapshot");
+        fs::create_dir(&outside).unwrap();
+
+        assert!(
+            checked_snapshot(saves.path(), copy.to_str().unwrap()).is_ok(),
+            "our own copy in the saves folder is fair game"
+        );
+        assert!(
+            checked_snapshot(saves.path(), real_world.to_str().unwrap()).is_err(),
+            "a real world is not a copy and must never be touched"
+        );
+        assert!(
+            checked_snapshot(saves.path(), outside.to_str().unwrap()).is_err(),
+            "a path outside the saves folder must be refused"
+        );
+        assert!(
+            checked_snapshot(saves.path(), saves.path().join("gone.snapshot").to_str().unwrap())
+                .is_err(),
+            "a copy that has already been removed must be refused"
         );
     }
 

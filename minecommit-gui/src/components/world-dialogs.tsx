@@ -32,9 +32,11 @@ import { localeOptions, useI18n, type Locale } from "@/contexts/i18n"
 import { useSaves, type Save } from "@/contexts/saves"
 import {
   cloudErrorLabel,
+  fileSize,
   relativeTime,
   type FoundWorld,
   type GrantedRepository,
+  type OldCopy,
 } from "@/lib/cloud"
 import { cn } from "@/lib/utils"
 
@@ -568,6 +570,170 @@ function AddFromCloud({
         </div>
       </DialogFooter>
     </>
+  )
+}
+
+/* ── The copies restores left behind ────────────────────────────────────── */
+
+/**
+ * Clearing out the worlds MineCommit left in the saves folder.
+ *
+ * A restore keeps the world it replaced, and until now it kept it right beside
+ * the original. Minecraft lists any folder holding a level.dat, so those copies
+ * turned up in the game as worlds of their own, with names differing only by a
+ * Unix timestamp -- which makes choosing what to play a guessing game.
+ *
+ * Moving is the default and deleting is the second option, because a copy is
+ * the world as it was before a restore and can hold an afternoon that was never
+ * backed up anywhere else.
+ */
+export function OldCopiesDialog({
+  open,
+  onOpenChange,
+  savesFolder,
+  onCleared,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  savesFolder: string
+  onCleared: () => void
+}) {
+  const { locale, t } = useI18n()
+  const [copies, setCopies] = useState<OldCopy[] | null>(null)
+  const [busy, setBusy] = useState<"move" | "delete" | null>(null)
+  const [confirming, setConfirming] = useState(false)
+  const [done, setDone] = useState("")
+  const [error, setError] = useState("")
+
+  useEffect(() => {
+    if (!open || !savesFolder) return
+    let ignore = false
+    invoke<OldCopy[]>("list_old_copies", { folder: savesFolder })
+      .then((found) => {
+        if (!ignore) setCopies(found)
+      })
+      .catch((err) => {
+        if (ignore) return
+        setCopies([])
+        setError(errorText(err))
+      })
+    return () => {
+      ignore = true
+    }
+  }, [open, savesFolder])
+
+  const paths = useMemo(() => (copies ?? []).map((copy) => copy.path), [copies])
+  const total = useMemo(
+    () => (copies ?? []).reduce((sum, copy) => sum + copy.bytes, 0),
+    [copies]
+  )
+
+  const run = useCallback(
+    async (what: "move" | "delete") => {
+      if (busy || paths.length === 0) return
+      setBusy(what)
+      setError("")
+      try {
+        if (what === "move") {
+          const where = await invoke<string>("tidy_old_copies", {
+            folder: savesFolder,
+            paths,
+          })
+          setDone(t("oldCopies.moved", { where }))
+        } else {
+          await invoke<number>("delete_old_copies", { folder: savesFolder, paths })
+          setDone(t("oldCopies.none"))
+        }
+        setCopies([])
+        onCleared()
+      } catch (err) {
+        setError(errorText(err))
+      } finally {
+        setBusy(null)
+        setConfirming(false)
+      }
+    },
+    [busy, onCleared, paths, savesFolder, t]
+  )
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{t("oldCopies.title")}</DialogTitle>
+          <DialogDescription>{t("oldCopies.body")}</DialogDescription>
+        </DialogHeader>
+
+        {copies === null ? (
+          <p className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" />
+            {t("oldCopies.scanning")}
+          </p>
+        ) : copies.length === 0 ? (
+          <p className="py-4 text-sm text-muted-foreground">
+            {done || t("oldCopies.none")}
+          </p>
+        ) : (
+          <>
+            <ul className="max-h-64 divide-y overflow-y-auto">
+              {copies.map((copy) => (
+                <li key={copy.path} className="flex items-center gap-3 py-2">
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm">
+                      {t("oldCopies.from", { world: copy.world })}
+                    </span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {copy.taken
+                        ? t("oldCopies.taken", { when: relativeTime(copy.taken, locale) })
+                        : ""}
+                    </span>
+                  </span>
+                  <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                    {fileSize(copy.bytes)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-muted-foreground">
+              {t("oldCopies.total", { size: fileSize(total) })}
+            </p>
+          </>
+        )}
+
+        {confirming && (
+          <p className="text-sm text-destructive">{t("oldCopies.deleteConfirm")}</p>
+        )}
+        {error && <p className="text-sm break-words text-destructive">{error}</p>}
+
+        <DialogFooter className="sm:justify-between">
+          {copies !== null && copies.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-destructive hover:text-destructive"
+              disabled={busy !== null}
+              onClick={() => (confirming ? void run("delete") : setConfirming(true))}
+            >
+              {busy === "delete" && <Loader2 data-icon="inline-start" className="animate-spin" />}
+              {busy === "delete"
+                ? t("oldCopies.deleting")
+                : confirming
+                  ? t("oldCopies.deleteYes")
+                  : t("oldCopies.deleteAction")}
+            </Button>
+          )}
+          <div className="flex gap-2">
+            <DialogClose render={<Button variant="outline">{t("common.close")}</Button>} />
+            {copies !== null && copies.length > 0 && (
+              <Button disabled={busy !== null} onClick={() => void run("move")}>
+                {busy === "move" && <Loader2 data-icon="inline-start" className="animate-spin" />}
+                {busy === "move" ? t("oldCopies.moving") : t("oldCopies.moveAction")}
+              </Button>
+            )}
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

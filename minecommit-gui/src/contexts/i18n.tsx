@@ -298,6 +298,26 @@ const en = {
 
   /* ── The guide ──────────────────────────────────────────────────────── */
 
+  "oldCopies.banner": "{count} old world copies are showing up in Minecraft",
+  "oldCopies.review": "Sort this out",
+  "oldCopies.title": "Copies left among your worlds",
+  "oldCopies.body":
+    "Every time you went back to an earlier backup, MineCommit kept the world you had at that moment. They were left in your saves folder, which is why Minecraft lists them next to your real worlds. Moving them out gets them out of the game and keeps every one of them.",
+  "oldCopies.scanning": "Adding up what they take…",
+  "oldCopies.none": "Nothing left to tidy up.",
+  "oldCopies.from": "from {world}",
+  "oldCopies.taken": "kept {when}",
+  "oldCopies.total": "{size} in total",
+  "oldCopies.moveAction": "Move them out of Minecraft",
+  "oldCopies.moving": "Moving…",
+  "oldCopies.moved":
+    "Moved out of your saves folder. Minecraft will not list them any more, and they are still there if you need them: {where}",
+  "oldCopies.deleteAction": "Delete instead",
+  "oldCopies.deleting": "Deleting…",
+  "oldCopies.deleteConfirm":
+    "Delete these for good? A copy can hold play time that was never backed up anywhere else.",
+  "oldCopies.deleteYes": "Delete them for good",
+
   "guide.title": "How MineCommit works",
 
   "guide.what.topic": "What this does",
@@ -604,6 +624,25 @@ const zhCN: Record<TranslationKey, string> = {
   "settings.emailPlaceholder": "例如：steve@example.com",
   "settings.identityHelp":
     "会写在每个备份旁边，方便你分辨是哪台电脑做的。不会展示给其他人。",
+
+  "oldCopies.banner": "有 {count} 个旧存档副本出现在 Minecraft 里",
+  "oldCopies.review": "去处理",
+  "oldCopies.title": "混在存档里的旧副本",
+  "oldCopies.body":
+    "每次你回到更早的备份时，MineCommit 都会保留当时的那个世界。它们留在了存档文件夹里，所以 Minecraft 会把它们和你真正的存档并排列出来。把它们移出去就不会再出现在游戏里，而且一个都不会少。",
+  "oldCopies.scanning": "正在统计它们占用的空间…",
+  "oldCopies.none": "没有需要整理的了。",
+  "oldCopies.from": "来自 {world}",
+  "oldCopies.taken": "{when}保留",
+  "oldCopies.total": "共 {size}",
+  "oldCopies.moveAction": "把它们移出 Minecraft",
+  "oldCopies.moving": "移动中…",
+  "oldCopies.moved":
+    "已移出存档文件夹。Minecraft 不会再列出它们，需要时仍然找得到：{where}",
+  "oldCopies.deleteAction": "改为删除",
+  "oldCopies.deleting": "删除中…",
+  "oldCopies.deleteConfirm": "确定要永久删除吗？副本里可能有从未备份到别处的游戏进度。",
+  "oldCopies.deleteYes": "永久删除",
 
   "guide.title": "MineCommit 是怎么工作的",
 
