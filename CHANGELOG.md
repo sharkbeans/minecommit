@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.10.0 (2026-08-23)
+
+New
+
+- A backup now shows how far it has got: a progress bar with a percentage, the
+  number of files done out of the total, how long it has been running, and an
+  estimate of how much longer. The estimate is held back until the run is a
+  twentieth of the way in, because before that it is measured over so little
+  work that it swings by minutes between updates. A restore has no total to
+  divide by, so it counts files rather than guessing at a percentage.
+- Worlds are re-checked against GitHub on their own, every three minutes, so
+  the list stays true after a session of play instead of showing what was true
+  when the app opened. The check is skipped while a backup is running and while
+  the window is hidden, and goes one world at a time rather than firing a burst
+  of requests. There is a button in the top right for anyone who does not want
+  to wait for the timer, and the world panel says when its answer was taken.
+
 ## 0.9.1 (2026-08-22)
 
 Bug fixes
