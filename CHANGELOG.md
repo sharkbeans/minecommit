@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.11.1 (2026-08-23)
+
+Bug fixes
+
+- Worlds were disappearing from Minecraft's own world list while MineCommit sat
+  idle, and coming back only when the game was restarted. The status check asked
+  whether a world was in use by acquiring its session.lock, and while MineCommit
+  holds that lock Minecraft cannot take it -- so Minecraft dropped the world from
+  the list it builds for the game. Since 0.10.0 that check ran on a timer for
+  every world for as long as the app was open, which turned a lock held for an
+  instant into a collision that could recur all evening. It now asks whether the
+  lock would conflict instead of taking it.
+
+  The world you were playing was never at risk: the check fails when Minecraft
+  holds the lock, so it could not take one out from under a running game. Only
+  closed worlds were briefly locked, and only the list was affected. Nothing on
+  disk was changed.
+
+  On Windows there is no way to test a lock without taking it, so the badge no
+  longer says whether Minecraft has a world open. Backing up is unaffected: it
+  still checks properly, and still refuses to run on a world the game has open.
+
 ## 0.11.0 (2026-08-23)
 
 Going back to an earlier backup keeps the world it replaced, and until now it
