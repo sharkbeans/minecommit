@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.11.2 (2026-08-23)
+
+Changes
+
+- Worlds are no longer re-checked on a timer. The button in the top right still
+  checks all of them whenever you want it to; nothing happens on its own any
+  more.
+
+  The fault that made the timer dangerous was fixed in 0.11.1, but the shape of
+  it is what turned a small mistake into a recurring one: a background loop
+  reaching into save folders every few minutes is a standing bet that everything
+  it does there is harmless. Asking on request costs a button press and makes no
+  such bet.
+
 ## 0.11.1 (2026-08-23)
 
 Bug fixes
