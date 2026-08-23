@@ -56,6 +56,51 @@ export interface WorldState {
   last_played: string | null
 }
 
+/** How far the running backup or restore has got, from the Rust side. */
+export interface BackupProgress {
+  done: number
+  total: number
+}
+
+/**
+ * The fraction done, or null when there is nothing to divide by.
+ *
+ * A file can be read more than once and a handful are only skipped, so the
+ * count can drift past the total or stop just short of it. Neither is worth
+ * explaining to the player: clamp, and let the phase ending fill the bar.
+ */
+export function fractionDone(progress: BackupProgress | null): number | null {
+  if (!progress || progress.total <= 0) return null
+  return Math.min(1, Math.max(0, progress.done / progress.total))
+}
+
+/**
+ * Seconds still to go, guessed from how long the work so far has taken.
+ *
+ * Held back until a twentieth of the way in: before that the rate is measured
+ * over so little work that the estimate swings by minutes between updates,
+ * which is worse than showing nothing.
+ */
+export function secondsRemaining(
+  fraction: number | null,
+  elapsedSeconds: number
+): number | null {
+  if (fraction === null || fraction < 0.05 || fraction >= 1) return null
+  if (elapsedSeconds < 3) return null
+  return Math.round((elapsedSeconds / fraction) * (1 - fraction))
+}
+
+/** "about 2 min left", in the coarsest unit that is still honest. */
+export function remainingLabel(
+  seconds: number,
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string
+): string {
+  if (seconds < 60) return t("state.secondsLeft", { seconds: Math.max(5, Math.round(seconds / 5) * 5) })
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return t("state.minutesLeft", { minutes })
+  return t("state.hoursLeft", { hours: Math.round(seconds / 360) / 10 })
+}
+
 export interface BackupResult {
   backed_up: boolean
   uploaded: boolean

@@ -78,6 +78,8 @@ const en = {
   "dash.showLog": "Show details",
   "dash.checking": "Checking…",
   "dash.recheck": "Check again",
+  "dash.checkNow": "Check every world now",
+  "dash.checkedAgo": "checked {when}",
 
   /* ── First run ──────────────────────────────────────────────────────── */
 
@@ -135,6 +137,11 @@ const en = {
     "The first backup of a world copies all of it, which can take several minutes. It is safe to leave this running.",
   "state.gettingLatest": "Getting the latest world…",
   "state.elapsed": "{time} so far",
+  "state.filesDone": "{done} of {total} files",
+  "state.filesWritten": "{done} files so far",
+  "state.secondsLeft": "about {seconds} seconds left",
+  "state.minutesLeft": "about {minutes} min left",
+  "state.hoursLeft": "about {hours} hours left",
 
   /* ── How it went ────────────────────────────────────────────────────── */
 
@@ -407,6 +414,8 @@ const zhCN: Record<TranslationKey, string> = {
   "dash.showLog": "查看详情",
   "dash.checking": "检查中…",
   "dash.recheck": "再检查一次",
+  "dash.checkNow": "立即检查所有存档",
+  "dash.checkedAgo": "{when}检查过",
 
   "welcome.title": "再也不会弄丢世界",
   "welcome.body":
@@ -455,6 +464,11 @@ const zhCN: Record<TranslationKey, string> = {
     "一个存档的第一次备份要复制全部内容，可能需要几分钟。让它跑着就好。",
   "state.gettingLatest": "正在取回最新的世界…",
   "state.elapsed": "已用 {time}",
+  "state.filesDone": "{total} 个文件中的第 {done} 个",
+  "state.filesWritten": "已处理 {done} 个文件",
+  "state.secondsLeft": "大约还剩 {seconds} 秒",
+  "state.minutesLeft": "大约还剩 {minutes} 分钟",
+  "state.hoursLeft": "大约还剩 {hours} 小时",
 
   "result.done": "已备份并上传",
   "result.localOnly": "已在本机备份",

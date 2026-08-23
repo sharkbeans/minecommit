@@ -12,6 +12,7 @@ import {
   Loader2,
   Lock,
   Plus,
+  RefreshCw,
   RotateCcw,
   Settings2,
   Upload,
@@ -42,10 +43,14 @@ import { useSaves, type Save } from "@/contexts/saves"
 import {
   absoluteTime,
   cloudErrorLabel,
+  fractionDone,
   playedSinceBackup,
   relativeTime,
+  remainingLabel,
+  secondsRemaining,
   repoLabel,
   situationOf,
+  type BackupProgress,
   type BackupResult,
   type CloudStatus,
   type HistoryEntry,
@@ -58,6 +63,15 @@ import { cn } from "@/lib/utils"
 const DEFAULT_NOTE = "Backup"
 
 type Busy = "backup" | "latest" | "restore" | null
+
+/**
+ * How often every world is re-checked against GitHub.
+ *
+ * Often enough that the list is still true after a session of play, rare enough
+ * that a folder of worlds is not a stream of requests: one round trip per world
+ * per interval.
+ */
+const RECHECK_MS = 3 * 60 * 1000
 
 interface Outcome {
   tone: "good" | "warn" | "bad"
@@ -116,12 +130,20 @@ export function DashboardPage() {
   const [busy, setBusy] = useState<Busy>(null)
   const [outcome, setOutcome] = useState<Outcome | null>(null)
   const [statusError, setStatusError] = useState("")
+  const [checking, setChecking] = useState(false)
+  const [checkedAt, setCheckedAt] = useState<string | null>(null)
 
+  const [progress, setProgress] = useState<BackupProgress | null>(null)
   const [logs, setLogs] = useState<LogLine[]>([])
   const [logOpen, setLogOpen] = useState(false)
   const [logFinished, setLogFinished] = useState(false)
   const [operation, setOperation] = useState<Operation>("commit")
   const unlisteners = useRef<Array<() => void>>([])
+  // Read by the re-check timer, which must not be torn down and rebuilt every
+  // time a world list or a button changes.
+  const savesRef = useRef(saves)
+  const busyRef = useRef<Busy>(null)
+  const checkingRef = useRef(false)
 
   const [addOpen, setAddOpen] = useState(false)
   const [connectOpen, setConnectOpen] = useState(false)
@@ -216,6 +238,49 @@ export function DashboardPage() {
     })
   }, [saves, readStatus, readWorldState])
 
+  /* Checking every world ------------------------------------------------ */
+
+  useEffect(() => {
+    savesRef.current = saves
+  }, [saves])
+  useEffect(() => {
+    busyRef.current = busy
+  }, [busy])
+
+  // One world at a time: each cloud check is a round trip to GitHub, and firing
+  // them together on a ten-world folder is a burst of authenticated requests
+  // for no gain -- nothing is waiting on the answer.
+  const checkEveryWorld = useCallback(async () => {
+    // The timer and the button call the same thing, and a slow round of checks
+    // can still be running when the next one is due.
+    if (checkingRef.current) return
+    checkingRef.current = true
+    setChecking(true)
+    try {
+      for (const save of savesRef.current) {
+        await readStatus(save, true)
+        await readWorldState(save)
+      }
+      setCheckedAt(new Date().toISOString())
+    } finally {
+      checkingRef.current = false
+      setChecking(false)
+    }
+  }, [readStatus, readWorldState])
+
+  // The badges answer "is this world safe?", and an answer from when the app
+  // opened stops being one after an evening of play. Re-check on a timer so the
+  // list is true without anyone having to ask it to be.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      // A backup in flight is already changing everything this would read, and
+      // a hidden window has nobody reading the badges.
+      if (busyRef.current !== null || document.hidden) return
+      void checkEveryWorld()
+    }, RECHECK_MS)
+    return () => clearInterval(timer)
+  }, [checkEveryWorld])
+
   const refreshSelected = useCallback(async () => {
     if (!selectedSave) return
     await readStatus(selectedSave, true)
@@ -256,13 +321,17 @@ export function DashboardPage() {
   const startLogging = useCallback(async (op: Operation) => {
     setLogs([])
     setLogFinished(false)
+    setProgress(null)
     setOperation(op)
     unlisteners.current.forEach((stop) => stop())
     const line = await listen<LogLine>("commit-log", (event) => {
       setLogs((current) => [...current, event.payload])
     })
+    const moved = await listen<BackupProgress>("backup-progress", (event) => {
+      setProgress(event.payload)
+    })
     const finished = await listen("commit-finished", () => setLogFinished(true))
-    unlisteners.current = [line, finished]
+    unlisteners.current = [line, moved, finished]
   }, [])
 
   useEffect(
@@ -458,6 +527,20 @@ export function DashboardPage() {
           <Button
             variant="ghost"
             size="icon-sm"
+            disabled={checking}
+            title={
+              checkedAt
+                ? t("dash.checkedAgo", { when: relativeTime(checkedAt, locale) })
+                : t("dash.checkNow")
+            }
+            onClick={() => void checkEveryWorld()}
+          >
+            <RefreshCw className={cn(checking && "animate-spin")} />
+            <span className="sr-only">{t("dash.checkNow")}</span>
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
             title={t("dash.help")}
             onClick={() => setGuideOpen(true)}
           >
@@ -573,6 +656,11 @@ export function DashboardPage() {
                             when: relativeTime(status.local_timestamp, locale),
                           })
                         : t("dash.neverBackedUp")}
+                      {checking
+                        ? ` · ${t("dash.checking")}`
+                        : checkedAt
+                          ? ` · ${t("dash.checkedAgo", { when: relativeTime(checkedAt, locale) })}`
+                          : ""}
                     </p>
                   )}
                 </div>
@@ -589,6 +677,7 @@ export function DashboardPage() {
                 latestLog={latestLog}
                 outcome={outcome}
                 statusError={statusError}
+                progress={progress}
                 onBackUp={() => void backUp()}
                 onGetLatest={() => void getLatest()}
                 onConnect={() => setConnectOpen(true)}
@@ -769,15 +858,19 @@ function clock(seconds: number) {
  */
 function WorkingCard({
   busy,
+  progress,
   latestLog,
   onShowLog,
 }: {
   busy: Exclude<Busy, null>
+  progress: BackupProgress | null
   latestLog: string
   onShowLog: () => void
 }) {
-  const { t } = useI18n()
+  const { locale, t } = useI18n()
   const [seconds, setSeconds] = useState(0)
+  const fraction = fractionDone(progress)
+  const left = secondsRemaining(fraction, seconds)
 
   useEffect(() => {
     const started = Date.now()
@@ -790,8 +883,8 @@ function WorkingCard({
 
   return (
     <div className="flex flex-col items-center gap-3 rounded-xl border p-8 text-center">
-      <Loader2 className="size-6 animate-spin text-muted-foreground" />
-      <div className="flex flex-col gap-1">
+      {fraction === null && <Loader2 className="size-6 animate-spin text-muted-foreground" />}
+      <div className="flex w-full max-w-sm flex-col gap-2">
         <p className="text-sm font-medium">
           {busy === "backup"
             ? t("state.backingUp")
@@ -799,8 +892,40 @@ function WorkingCard({
               ? t("state.gettingLatest")
               : t("restoreTo.working")}
         </p>
-        <p className="font-mono text-xs text-muted-foreground">
-          {t("state.elapsed", { time: clock(seconds) })}
+
+        {fraction !== null && (
+          <>
+            <div
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(fraction * 100)}
+              className="h-2 w-full overflow-hidden rounded-full bg-muted"
+            >
+              <div
+                className="h-full rounded-full bg-primary transition-[width] duration-300 ease-out"
+                style={{ width: `${Math.round(fraction * 1000) / 10}%` }}
+              />
+            </div>
+            <p className="flex items-baseline justify-between gap-2 text-xs text-muted-foreground">
+              <span className="font-mono">{Math.floor(fraction * 100)}%</span>
+              <span className="truncate">
+                {progress &&
+                  t("state.filesDone", {
+                    done: progress.done.toLocaleString(locale),
+                    total: progress.total.toLocaleString(locale),
+                  })}
+              </span>
+            </p>
+          </>
+        )}
+
+        <p className="flex items-baseline justify-between gap-2 font-mono text-xs text-muted-foreground">
+          <span>{t("state.elapsed", { time: clock(seconds) })}</span>
+          {left !== null && <span>{remainingLabel(left, t)}</span>}
+          {left === null && fraction === null && progress && progress.done > 0 && (
+            <span>{t("state.filesWritten", { done: progress.done.toLocaleString(locale) })}</span>
+          )}
         </p>
       </div>
       {latestLog && (
@@ -839,6 +964,7 @@ const SITUATION_COPY: Record<
 function ActionCard({
   situation,
   busy,
+  progress,
   note,
   setNote,
   latestLog,
@@ -853,6 +979,7 @@ function ActionCard({
 }: {
   situation: Situation
   busy: Busy
+  progress: BackupProgress | null
   note: string
   setNote: (note: string) => void
   latestLog: string
@@ -882,7 +1009,15 @@ function ActionCard({
               : Upload
 
   if (busy !== null) {
-    return <WorkingCard key={busy} busy={busy} latestLog={latestLog} onShowLog={onShowLog} />
+    return (
+      <WorkingCard
+        key={busy}
+        busy={busy}
+        progress={progress}
+        latestLog={latestLog}
+        onShowLog={onShowLog}
+      />
+    )
   }
 
   if (outcome) {
