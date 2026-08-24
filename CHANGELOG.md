@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.12.2 (2026-08-24)
+
+Fixes
+
+- MineCommit could not find the copies it makes. Every restore keeps the world
+  it replaced, and where those are kept has changed three times over the
+  releases; the search for them only ever looked in the oldest of the three
+  places. So since 0.11 the app has been making copies it never afterwards
+  mentioned. One machine had 9.3 GB of them, in four copies across two folders.
+
+  All three places are searched now. The banner leads with how much room they
+  take, and says separately how many are sitting among your worlds where
+  Minecraft lists them.
+
+- A fetch nobody was waiting on moved the progress bar. Checking whether the
+  cloud has anything new is a fetch too, and so is the one an upload does before
+  it starts, and both were quietly driving a bar.
+
+- Three checks that read this program's own source to make sure it keeps a
+  promise did not work on Windows, where the repository is checked out with
+  different line endings. One failed outright; two found nothing to check and
+  passed, which is worse.
+
 ## 0.12.1 (2026-08-24)
 
 Fixes
