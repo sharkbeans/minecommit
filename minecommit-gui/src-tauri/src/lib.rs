@@ -2692,7 +2692,9 @@ mod tests {
     /// claim.
     #[test]
     fn reporting_a_world_state_never_takes_its_lock() {
-        let source = include_str!("lib.rs");
+        // Normalised: Windows checks this repository out with CRLF, where a
+        // scan looking for "\n}\n" finds nothing and the guard passes blind.
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
         let start = source
             .find("fn world_state(")
             .expect("world_state must exist");

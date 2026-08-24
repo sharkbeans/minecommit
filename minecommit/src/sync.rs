@@ -1322,7 +1322,11 @@ mod tests {
     fn a_test_that_transfers_holds_the_progress_lock() {
         const TRANSFERS: [&str; 4] = [".fetch()", ".push()", ".fast_forward()", "sync_before_playing("];
 
-        let source = include_str!("sync.rs");
+        // Normalised first: Windows checks this repository out with CRLF line
+        // endings, and a scan keyed on "\n    fn " finds no tests at all there
+        // -- passing by finding nothing, which is the worst way for a guard to
+        // behave.
+        let source = include_str!("sync.rs").replace("\r\n", "\n");
         let tests = &source[source.find("mod tests {").expect("a test module")..];
 
         // Test bodies run from one `fn name() {` to the next; the last one ends

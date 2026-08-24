@@ -669,7 +669,10 @@ mod transfer_tests {
     /// same way this file already guards how Git is spawned.
     #[test]
     fn a_transfer_nobody_asked_about_moves_nothing() {
-        let source = include_str!("cmd.rs");
+        // Normalised first: Windows checks this repository out with CRLF line
+        // endings, and a scan looking for "\n}\n" finds nothing there. A guard
+        // that quietly matches nothing on one platform is worse than no guard.
+        let source = include_str!("cmd.rs").replace("\r\n", "\n");
         let start = source
             .find("fn report_transfer(")
             .expect("report_transfer must exist");
