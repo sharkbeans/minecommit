@@ -69,6 +69,90 @@ export interface FoundWorld {
   name: string
   path: string
   last_played: string | null
+  /** The in-game name, when the folder has been renamed away from it. */
+  level_name: string | null
+  version: string | null
+}
+
+/** What level.dat says about a world. Every field may be missing. */
+export interface LevelInfo {
+  level_name: string | null
+  version_name: string | null
+  data_version: number | null
+  snapshot_version: boolean
+  game_mode: string | null
+  hardcore: boolean
+  difficulty: string | null
+  difficulty_locked: boolean
+  cheats: boolean
+  last_played: number | null
+  world_age_ticks: number | null
+  /** Text, not a number: a 64-bit seed does not survive a JSON number. */
+  seed: string | null
+  spawn: [number, number, number] | null
+  data_packs: string[]
+  modded: boolean
+}
+
+export interface WorldDetails {
+  level: LevelInfo | null
+  bytes: number
+}
+
+/** One Minecraft day. */
+const TICKS_PER_DAY = 24000
+
+/** Which in-game day the world has reached. */
+export function inGameDay(level: LevelInfo | null): number | null {
+  if (level?.world_age_ticks == null) return null
+  return Math.floor(level.world_age_ticks / TICKS_PER_DAY)
+}
+
+const GAME_MODES: Record<string, TranslationKey> = {
+  survival: "world.mode.survival",
+  creative: "world.mode.creative",
+  adventure: "world.mode.adventure",
+  spectator: "world.mode.spectator",
+}
+
+const DIFFICULTIES: Record<string, TranslationKey> = {
+  peaceful: "world.difficulty.peaceful",
+  easy: "world.difficulty.easy",
+  normal: "world.difficulty.normal",
+  hard: "world.difficulty.hard",
+}
+
+/**
+ * The translated name of a game mode or difficulty.
+ *
+ * Minecraft has added modes and difficulties before and may again, and the
+ * value arrives as whatever name the world itself used. A name with no
+ * translation is shown as the world spelled it rather than dropped: telling
+ * the player their world is on some difficulty this build has not heard of is
+ * right, and telling them it has none is not.
+ */
+function nameOf(
+  value: string | null,
+  known: Record<string, TranslationKey>,
+  t: (key: TranslationKey) => string
+): string | null {
+  if (!value) return null
+  const key = known[value]
+  return key ? t(key) : value.charAt(0).toUpperCase() + value.slice(1)
+}
+
+export function gameModeName(
+  mode: string | null,
+  t: (key: TranslationKey) => string
+): string | null {
+  return nameOf(mode, GAME_MODES, t)
+}
+
+export function difficultyName(
+  difficulty: string | null,
+  t: (key: TranslationKey) => string
+): string | null {
+  return nameOf(difficulty, DIFFICULTIES, t)
 }
 
 export interface WorldState {
@@ -77,22 +161,111 @@ export interface WorldState {
   last_played: string | null
 }
 
+/** What the running work is doing. Matches `Phase` in `progress.rs`. */
+export type Phase = "idle" | "reading" | "writing" | "downloading" | "uploading"
+
 /** How far the running backup or restore has got, from the Rust side. */
 export interface BackupProgress {
-  done: number
-  total: number
+  phase: Phase
+  files_done: number
+  files_total: number
+  bytes_done: number
+  /** Zero when the size of the job is not knowable, as during a transfer. */
+  bytes_total: number
+}
+
+/** The headline for each phase. Only "idle" has none, and never shows. */
+export const PHASE_TITLE: Record<Phase, TranslationKey | null> = {
+  idle: null,
+  reading: "state.phase.reading",
+  writing: "state.phase.writing",
+  downloading: "state.phase.downloading",
+  uploading: "state.phase.uploading",
 }
 
 /**
  * The fraction done, or null when there is nothing to divide by.
  *
- * A file can be read more than once and a handful are only skipped, so the
- * count can drift past the total or stop just short of it. Neither is worth
+ * Bytes first: a world is a few hundred multi-megabyte region files next to a
+ * few thousand tiny ones, so a bar driven by the file count sprints through the
+ * small ones and then sits still. During a transfer Git reports how much has
+ * arrived but never how much is coming, so there the object count is all there
+ * is.
+ *
+ * A file can be read more than once and a handful are only skipped, so either
+ * count can drift past its total or stop just short of it. Neither is worth
  * explaining to the player: clamp, and let the phase ending fill the bar.
  */
 export function fractionDone(progress: BackupProgress | null): number | null {
-  if (!progress || progress.total <= 0) return null
-  return Math.min(1, Math.max(0, progress.done / progress.total))
+  if (!progress) return null
+  const [done, total] =
+    progress.bytes_total > 0
+      ? [progress.bytes_done, progress.bytes_total]
+      : [progress.files_done, progress.files_total]
+  if (total <= 0) return null
+  return Math.min(1, Math.max(0, done / total))
+}
+
+/**
+ * How large the job is in total, and whether that is known or guessed.
+ *
+ * Reading a world or rebuilding one is measured before it starts, so the total
+ * is exact. A transfer is not: Git says only how much has arrived, so the total
+ * is extrapolated from the share of objects done -- and held back until enough
+ * of them are through that the guess is not wild. A guessed figure is marked as
+ * one wherever it is shown.
+ */
+export function totalBytes(
+  progress: BackupProgress | null,
+  fraction: number | null
+): { bytes: number; estimated: boolean } | null {
+  if (!progress) return null
+  if (progress.bytes_total > 0) return { bytes: progress.bytes_total, estimated: false }
+  if (fraction === null || fraction < 0.05 || progress.bytes_done <= 0) return null
+  return { bytes: Math.round(progress.bytes_done / fraction), estimated: true }
+}
+
+const SIZE_UNITS = ["B", "KB", "MB", "GB", "TB"]
+
+/** Megabytes: the unit people read a download in. */
+const MB = 2
+
+/**
+ * "351 / 1,024 MB" -- both halves in one unit, chosen from the total.
+ *
+ * Sizing each half on its own produces "999 MB / 1.0 GB", which reads as two
+ * unrelated numbers and hides how close the end is. And the largest unit that
+ * fits is not the most useful one: a gigabyte job shown in gigabytes spends its
+ * first half reading "0.4 / 1.0 GB", where a whole hundred megabytes of
+ * progress moves the first digit once. So step back down until the total is a
+ * two-digit number, but never below megabytes, which is the unit a transfer is
+ * spoken about in.
+ *
+ * `approximate` marks a total that was extrapolated rather than measured.
+ */
+export function sizePair(
+  done: number,
+  total: number,
+  locale: string,
+  approximate = false
+): string {
+  let unit = 0
+  let scale = 1
+  while (total / scale >= 1024 && unit < SIZE_UNITS.length - 1) {
+    scale *= 1024
+    unit += 1
+  }
+  while (unit > MB && total / scale < 10) {
+    scale /= 1024
+    unit -= 1
+  }
+  const show = (value: number) => {
+    const scaled = value / scale
+    return scaled < 10 && unit > 0
+      ? scaled.toFixed(1)
+      : Math.round(scaled).toLocaleString(locale)
+  }
+  return `${show(done)} / ${approximate ? "~" : ""}${show(total)} ${SIZE_UNITS[unit]}`
 }
 
 /**

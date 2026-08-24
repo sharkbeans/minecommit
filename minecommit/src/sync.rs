@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::TryLockError;
 
 use crate::{
-    utils::cmd::{git_cmd, git_command},
+    utils::cmd::{exec_watching_transfer, git_cmd, git_command},
     Config,
 };
 
@@ -208,7 +208,10 @@ impl RemoteSync {
             self.branch, DEFAULT_REMOTE, self.branch
         );
         log::info!("Fetching cloud branch '{}'", self.branch);
-        let output = run_git(&self.git_dir, ["fetch", "--no-tags", DEFAULT_REMOTE, &refspec])?;
+        let output = run_git_watching_transfer(
+            &self.git_dir,
+            ["fetch", "--no-tags", DEFAULT_REMOTE, &refspec],
+        )?;
         if output.success {
             return Ok(());
         }
@@ -441,7 +444,7 @@ impl RemoteSync {
                 let source = format!("refs/heads/{}:refs/heads/{}", self.branch, self.branch);
                 log::info!("Pushing cloud branch '{}'", self.branch);
                 ensure_git_success(
-                    run_git(&self.git_dir, ["push", DEFAULT_REMOTE, &source])?,
+                    run_git_watching_transfer(&self.git_dir, ["push", DEFAULT_REMOTE, &source])?,
                     "failed to push cloud backup without force",
                 )?;
                 self.fetch()?;
@@ -559,6 +562,25 @@ fn ensure_no_embedded_https_credentials(url: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Run a Git command that moves data over the network, reporting how far it
+/// gets while it runs.
+///
+/// `--progress` is what makes Git print its counters at all: it only draws them
+/// when stderr is a terminal, and MineCommit pipes stderr so it can be shown in
+/// the app. Everything else about the command, including how its output is
+/// judged, is unchanged.
+fn run_git_watching_transfer<const N: usize>(git_dir: &Path, args: [&str; N]) -> Result<GitOutput> {
+    let mut cmd = git_cmd(git_dir, args);
+    cmd.arg("--progress");
+    let output = exec_watching_transfer(cmd)
+        .context("failed to start Git; install Git and ensure it is on PATH")?;
+    Ok(GitOutput {
+        success: output.success,
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
 }
 
 fn run_git<const N: usize>(git_dir: &Path, args: [&str; N]) -> Result<GitOutput> {
@@ -683,8 +705,11 @@ fn conflicting_lock_holder(file: &File) -> Option<bool> {
     if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) } != 0 {
         return None;
     }
-    // F_GETLK sets l_type to F_UNLCK when nothing would block the lock.
-    Some(lock.l_type != libc::F_UNLCK as _)
+    // F_GETLK sets l_type to F_UNLCK when nothing would block the lock. Both
+    // sides are widened to a fixed type: `l_type` and `F_UNLCK` are each some
+    // platform-defined width, and an inferred comparison between them is
+    // ambiguous as soon as anything else in the build offers its own PartialEq.
+    Some(i32::from(lock.l_type) != libc::F_UNLCK as i32)
 }
 
 #[cfg(not(unix))]
@@ -1163,6 +1188,73 @@ mod tests {
 
     /// Write the smallest thing MineCommit accepts as a Java save: a valid NBT
     /// `level.dat` plus the `session.lock` that restore has to hold open.
+    /// The progress bar divides by what the backup measured before it started,
+    /// and shows the result as a size. Both halves have to be real: a total of
+    /// zero draws no bar at all, and a numerator that only counts files makes a
+    /// bar that sprints through a world's thousands of tiny files and then sits
+    /// still for minutes on its few hundred large ones.
+    #[test]
+    fn a_backup_measures_itself_in_bytes_before_it_starts() {
+        use crate::progress::{self, Phase};
+
+        let _progress = progress::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let save = dir.path().join("world");
+        write_minimal_save(&save);
+        // Something large enough that counting bytes and counting files give
+        // visibly different answers.
+        fs::create_dir_all(save.join("datapacks")).expect("datapacks");
+        fs::write(save.join("datapacks/big.json"), vec![b'x'; 200_000]).expect("a big file");
+
+        let level_bytes = fs::metadata(save.join("level.dat")).expect("level.dat").len();
+        let repo = init_bare();
+
+        // Sampled from another thread, because the counters are cleared the
+        // moment the file phase ends and the run is over before it returns.
+        let peak = std::sync::Arc::new(std::sync::Mutex::new(progress::report()));
+        let watching = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let watcher = {
+            let (peak, watching) = (peak.clone(), watching.clone());
+            std::thread::spawn(move || {
+                while watching.load(std::sync::atomic::Ordering::Relaxed) {
+                    let now = progress::report();
+                    let mut best = peak.lock().unwrap_or_else(|e| e.into_inner());
+                    if now.bytes_done >= best.bytes_done && now.running() {
+                        *best = now;
+                    }
+                    std::thread::yield_now();
+                }
+            })
+        };
+
+        Config::new(save.clone(), repo.path().to_path_buf(), vec![], vec![])
+            .commit(vec![], "backup", Some("refs/heads/main".to_string()), None, None)
+            .expect("backup");
+
+        watching.store(false, std::sync::atomic::Ordering::Relaxed);
+        watcher.join().expect("watcher");
+
+        let seen = *peak.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(seen.phase, Phase::Reading);
+        assert!(
+            seen.bytes_total >= 200_000 + level_bytes,
+            "the whole world is the denominator, got {}",
+            seen.bytes_total
+        );
+        assert!(
+            seen.bytes_done >= 200_000,
+            "reading the world must move the byte count, got {}",
+            seen.bytes_done
+        );
+        assert!(seen.files_total >= 2, "and the file count is still kept");
+
+        assert!(
+            !progress::report().running(),
+            "a finished backup must leave no bar behind"
+        );
+    }
+
     fn write_minimal_save(dir: &Path) {
         fs::create_dir_all(dir).expect("create save dir");
         let mut root = simdnbt::owned::NbtCompound::new();

@@ -27,6 +27,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { GithubMark, type GitHubAccount } from "@/components/github-account"
+import { GrassBlock } from "@/components/block-icon"
 import { useCommitAuthor } from "@/contexts/commit-author"
 import { localeOptions, useI18n, type Locale } from "@/contexts/i18n"
 import { useSaves, type Save } from "@/contexts/saves"
@@ -258,12 +259,17 @@ function AddFromThisPc({
                     checked={chosen.has(world.path)}
                     onCheckedChange={() => toggle(world.path)}
                   />
+                  <GrassBlock className="size-4" />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm">{world.name}</span>
                     <span className="block truncate text-xs text-muted-foreground">
                       {world.last_played
                         ? t("add.played", { when: relativeTime(world.last_played, locale) })
                         : t("add.neverPlayed")}
+                      {/* Two worlds with similar folder names are told apart by
+                          the version they were last opened in, which is also
+                          the thing that decides whether they still open. */}
+                      {world.version ? ` · ${world.version}` : ""}
                     </span>
                   </span>
                 </label>

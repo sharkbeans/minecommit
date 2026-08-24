@@ -9,6 +9,7 @@ use crate::{
 };
 
 mod handler;
+pub mod level;
 pub mod odb;
 pub mod progress;
 pub mod sync;
@@ -76,7 +77,8 @@ impl Config {
         // Counted before any work starts so the bar has a denominator. This
         // walks the save directory a second time, which costs seconds on a
         // world whose backup costs minutes.
-        progress::begin(save.glob("**/*")?.len() as u64);
+        let (files, bytes) = save.weigh(&save.glob("**/*")?);
+        progress::begin(progress::Phase::Reading, files, bytes);
 
         let mut processed = HashSet::new();
         for crafter in CrafterImpl::get_crafters(self.extra_patterns, self.ignore_patterns) {
@@ -118,10 +120,21 @@ impl Config {
         let mut save = LocalFsOdb::from_dir(self.save_dir.to_owned());
         let git = LocalGitOdb::from_commit(self.storage_dir.to_owned(), commit)?;
 
-        for crafter in CrafterImpl::get_crafters(self.extra_patterns, self.ignore_patterns) {
-            crafter.unflatten(&mut save, &git)?;
-        }
+        // Restoring counts what it reads out of the repository rather than what
+        // it writes to disk: a region file is reassembled from hundreds of
+        // stored chunks into one file, so counting the writes would sit at zero
+        // for minutes and then jump.
+        let (files, bytes) = git.weight();
+        progress::begin(progress::Phase::Writing, files, bytes);
 
-        Ok(())
+        let result = (|| {
+            for crafter in CrafterImpl::get_crafters(self.extra_patterns, self.ignore_patterns) {
+                crafter.unflatten(&mut save, &git)?;
+            }
+            Ok(())
+        })();
+        // A failed restore must not leave the bar frozen part-way across.
+        progress::end();
+        result
     }
 }

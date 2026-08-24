@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import { openUrl } from "@tauri-apps/plugin-opener"
@@ -17,6 +17,7 @@ import {
   Settings2,
   Upload,
 } from "lucide-react"
+import { Copy } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -33,6 +34,7 @@ import {
 import { CloudSetupDialog } from "@/components/cloud-setup"
 import { GuideDialog } from "@/components/guide"
 import { Welcome } from "@/components/welcome"
+import { GrassBlock } from "@/components/block-icon"
 import {
   AccountMenu,
   GitHubSignInDialog,
@@ -44,19 +46,28 @@ import { useSaves, type Save } from "@/contexts/saves"
 import {
   absoluteTime,
   cloudErrorLabel,
+  difficultyName,
+  fileSize,
   fractionDone,
+  gameModeName,
+  inGameDay,
   playedSinceBackup,
   relativeTime,
   remainingLabel,
   secondsRemaining,
   repoLabel,
   situationOf,
+  sizePair,
+  totalBytes,
+  PHASE_TITLE,
   type BackupProgress,
   type BackupResult,
   type CloudStatus,
   type HistoryEntry,
+  type LevelInfo,
   type OldCopy,
   type Situation,
+  type WorldDetails,
   type WorldState,
 } from "@/lib/cloud"
 import { cn } from "@/lib/utils"
@@ -119,6 +130,7 @@ export function DashboardPage() {
   const [statuses, setStatuses] = useState<Record<string, CloudStatus | null>>({})
   const [worldStates, setWorldStates] = useState<Record<string, WorldState>>({})
   const [historyByWorld, setHistoryByWorld] = useState<Record<string, HistoryEntry[]>>({})
+  const [detailsByWorld, setDetailsByWorld] = useState<Record<string, WorldDetails>>({})
   const [note, setNote] = useState("")
   const [busy, setBusy] = useState<Busy>(null)
   const [outcome, setOutcome] = useState<Outcome | null>(null)
@@ -223,6 +235,18 @@ export function DashboardPage() {
     [t]
   )
 
+  // What the world says about itself: version, mode, seed, size on disk. None
+  // of it is needed to back the world up, so a world that cannot answer simply
+  // shows less rather than showing an error.
+  const readDetails = useCallback(async (save: Save) => {
+    try {
+      const found = await invoke<WorldDetails>("world_details", { saveDir: save.path })
+      setDetailsByWorld((current) => ({ ...current, [save.name]: found }))
+    } catch {
+      // Leave whatever was there; an unreadable world is not news.
+    }
+  }, [])
+
   const readWorldState = useCallback(async (save: Save) => {
     try {
       const world = await invoke<WorldState>("world_state", { saveDir: save.path })
@@ -274,6 +298,7 @@ export function DashboardPage() {
     if (!selectedSave) return
     await readStatus(selectedSave, true)
     await readWorldState(selectedSave)
+    void readDetails(selectedSave)
     try {
       const entries = await invoke<HistoryEntry[]>("list_history", {
         gitDir: selectedSave.repo_path,
@@ -284,7 +309,7 @@ export function DashboardPage() {
     } catch {
       setHistoryByWorld((current) => ({ ...current, [selectedSave.name]: [] }))
     }
-  }, [readStatus, readWorldState, selectedSave])
+  }, [readDetails, readStatus, readWorldState, selectedSave])
 
   useEffect(() => {
     void (async () => {
@@ -343,6 +368,7 @@ export function DashboardPage() {
   /* Derived ------------------------------------------------------------ */
 
   const history = selectedSave ? historyByWorld[selectedSave.name] ?? null : null
+  const details = selectedSave ? detailsByWorld[selectedSave.name] : undefined
   const status = selectedSave ? statuses[selectedSave.name] ?? null : null
   const world = selectedSave ? worldStates[selectedSave.name] ?? null : null
   const hasCloud = Boolean(status?.remote_url || selectedSave?.remote_repo_path)
@@ -590,7 +616,10 @@ export function DashboardPage() {
                       selectedSave?.name === save.name ? "bg-muted" : "hover:bg-muted/60"
                     )}
                   >
-                    <span className="block truncate text-sm">{save.name}</span>
+                    <span className="flex items-center gap-2">
+                      <GrassBlock className="size-3.5" />
+                      <span className="truncate text-sm">{save.name}</span>
+                    </span>
                     {badge ? (
                       <span className={cn("block truncate text-xs", badge.className)}>
                         {t(badge.key)}
@@ -644,7 +673,20 @@ export function DashboardPage() {
             <div className="mx-auto flex max-w-2xl flex-col gap-6 p-6">
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
-                  <h1 className="truncate text-xl font-semibold">{selectedSave.name}</h1>
+                  <h1 className="flex min-w-0 items-center gap-2.5 text-xl font-semibold">
+                    <GrassBlock className="size-5" />
+                    <span className="truncate">{selectedSave.name}</span>
+                  </h1>
+                  {/* Renaming a world in Minecraft leaves its folder alone, so
+                      the name in the game and the name here drift apart. The
+                      folder is what MineCommit tracks, but the in-game name is
+                      the one the player recognises. */}
+                  {details?.level?.level_name &&
+                    details.level.level_name !== selectedSave.name && (
+                      <p className="mt-1 truncate text-xs text-muted-foreground">
+                        {t("world.inGameName", { name: details.level.level_name })}
+                      </p>
+                    )}
                   {status === null && !statusError ? (
                     // "Never backed up" is the wrong thing to say to someone
                     // whose world is backed up; it is only true once the
@@ -686,6 +728,8 @@ export function DashboardPage() {
                 onRecheck={() => void refreshSelected()}
                 onDismiss={() => setOutcome(null)}
               />
+
+              <WorldDetailsSection details={details} />
 
               <section className="flex flex-col gap-2">
                 <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
@@ -876,9 +920,18 @@ function WorkingCard({
   onShowLog: () => void
 }) {
   const { locale, t } = useI18n()
-  const [seconds, setSeconds] = useState(0)
   const fraction = fractionDone(progress)
-  const left = secondsRemaining(fraction, seconds)
+  const total = totalBytes(progress, fraction)
+  const phase = progress?.phase ?? "idle"
+
+  // Two clocks. The whole operation's elapsed time is what the player is
+  // waiting out, so that one runs from the moment this card appears. The
+  // estimate has to come from the current phase alone, so that one restarts
+  // whenever the phase does: a backup reads the world and then uploads it, and
+  // timing the upload against the minutes already spent reading would promise
+  // an ending long after the real one.
+  const [seconds, setSeconds] = useState(0)
+  const [phaseSeconds, setPhaseSeconds] = useState(0)
 
   useEffect(() => {
     const started = Date.now()
@@ -889,16 +942,38 @@ function WorkingCard({
     return () => clearInterval(timer)
   }, [])
 
+  useEffect(() => {
+    const started = Date.now()
+    const timer = setInterval(
+      () => setPhaseSeconds(Math.floor((Date.now() - started) / 1000)),
+      1000
+    )
+    return () => clearInterval(timer)
+  }, [phase])
+
+  const left = secondsRemaining(fraction, phaseSeconds)
+
+  const headline = PHASE_TITLE[phase]
+  const counting = phase === "reading" || phase === "writing"
+
+  const size = total
+    ? sizePair(progress?.bytes_done ?? 0, total.bytes, locale, total.estimated)
+    : progress && progress.bytes_done > 0
+      ? t("state.downloaded", { size: fileSize(progress.bytes_done) })
+      : ""
+
   return (
     <div className="flex flex-col items-center gap-3 rounded-xl border p-8 text-center">
       {fraction === null && <Loader2 className="size-6 animate-spin text-muted-foreground" />}
       <div className="flex w-full max-w-sm flex-col gap-2">
         <p className="text-sm font-medium">
-          {busy === "backup"
-            ? t("state.backingUp")
-            : busy === "latest"
-              ? t("state.gettingLatest")
-              : t("restoreTo.working")}
+          {headline
+            ? t(headline)
+            : busy === "backup"
+              ? t("state.backingUp")
+              : busy === "latest"
+                ? t("state.gettingLatest")
+                : t("restoreTo.working")}
         </p>
 
         {fraction !== null && (
@@ -915,15 +990,9 @@ function WorkingCard({
                 style={{ width: `${Math.round(fraction * 1000) / 10}%` }}
               />
             </div>
-            <p className="flex items-baseline justify-between gap-2 text-xs text-muted-foreground">
-              <span className="font-mono">{Math.floor(fraction * 100)}%</span>
-              <span className="truncate">
-                {progress &&
-                  t("state.filesDone", {
-                    done: progress.done.toLocaleString(locale),
-                    total: progress.total.toLocaleString(locale),
-                  })}
-              </span>
+            <p className="flex items-baseline justify-between gap-2 font-mono text-xs text-muted-foreground">
+              <span>{Math.floor(fraction * 100)}%</span>
+              <span className="truncate">{size}</span>
             </p>
           </>
         )}
@@ -931,10 +1000,21 @@ function WorkingCard({
         <p className="flex items-baseline justify-between gap-2 font-mono text-xs text-muted-foreground">
           <span>{t("state.elapsed", { time: clock(seconds) })}</span>
           {left !== null && <span>{remainingLabel(left, t)}</span>}
-          {left === null && fraction === null && progress && progress.done > 0 && (
-            <span>{t("state.filesWritten", { done: progress.done.toLocaleString(locale) })}</span>
-          )}
+          {left === null && fraction === null && size && <span>{size}</span>}
         </p>
+
+        {/* A count of files says something a size does not: whether the work
+            left is one huge region file or ten thousand small ones. During a
+            transfer the same number counts Git's objects, which are not files
+            and must not be labelled as any. */}
+        {counting && progress && progress.files_total > 0 && (
+          <p className="font-mono text-xs text-muted-foreground/70">
+            {t("state.filesDone", {
+              done: progress.files_done.toLocaleString(locale),
+              total: progress.files_total.toLocaleString(locale),
+            })}
+          </p>
+        )}
       </div>
       {latestLog && (
         <p className="max-w-full truncate font-mono text-xs text-muted-foreground">
@@ -950,6 +1030,182 @@ function WorkingCard({
         {t("dash.showLog")}
       </Button>
     </div>
+  )
+}
+
+
+/* ── What the world says about itself ────────────────────────────────────── */
+
+/**
+ * Copy text without a clipboard plugin.
+ *
+ * The webview's clipboard API is the right one and works in a secure context,
+ * but it rejects outright in a few packaging setups, and a copy button that
+ * silently does nothing is worse than no button. The old selection-based route
+ * is deprecated everywhere and still implemented everywhere, which is exactly
+ * what a fallback needs to be.
+ */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    try {
+      const field = document.createElement("textarea")
+      field.value = text
+      field.setAttribute("readonly", "")
+      field.style.position = "fixed"
+      field.style.opacity = "0"
+      document.body.appendChild(field)
+      field.select()
+      const copied = document.execCommand("copy")
+      document.body.removeChild(field)
+      return copied
+    } catch {
+      return false
+    }
+  }
+}
+
+function DetailRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <>
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="min-w-0">{children}</dd>
+    </>
+  )
+}
+
+/** A property of the world that is either on or off, like hardcore. */
+function Flag({ label }: { label: string }) {
+  return (
+    <span className="rounded border px-1.5 py-px text-xs text-muted-foreground">{label}</span>
+  )
+}
+
+/**
+ * The world's own details, as Minecraft records them.
+ *
+ * Everything here comes out of level.dat and every field of it is optional: the
+ * file has changed shape repeatedly over fifteen years and mods add and remove
+ * parts of it. A row whose value is missing is left out rather than shown
+ * empty, so an old world looks sparse instead of broken.
+ */
+function WorldDetailsSection({ details }: { details: WorldDetails | undefined }) {
+  const { locale, t } = useI18n()
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), 1500)
+    return () => clearTimeout(timer)
+  }, [copied])
+
+  const level: LevelInfo | null = details?.level ?? null
+  const mode = gameModeName(level?.game_mode ?? null, t)
+  const difficulty = difficultyName(level?.difficulty ?? null, t)
+  const day = inGameDay(level)
+
+  return (
+    <section className="flex flex-col gap-2">
+      <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        {t("world.details")}
+      </h2>
+
+      {details === undefined ? (
+        <dl className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-2 py-1 text-sm">
+          {[0, 1, 2, 3].map((row) => (
+            <Fragment key={row}>
+              <Skeleton className="h-3.5 w-20 rounded" />
+              <Skeleton className="h-3.5 w-32 rounded" />
+            </Fragment>
+          ))}
+        </dl>
+      ) : (
+        <dl className="grid grid-cols-[max-content_minmax(0,1fr)] items-baseline gap-x-4 gap-y-2 py-1 text-sm">
+          {level?.version_name && (
+            <DetailRow label={t("world.version")}>
+              {level.snapshot_version
+                ? t("world.snapshotVersion", { version: level.version_name })
+                : level.version_name}
+            </DetailRow>
+          )}
+
+          {mode && (
+            <DetailRow label={t("world.mode")}>
+              <span className="flex flex-wrap items-baseline gap-1.5">
+                {mode}
+                {/* Hardcore is the one that matters most to say out loud: a
+                    death ends the world, which is exactly when somebody
+                    reaches for a backup. */}
+                {level?.hardcore && <Flag label={t("world.hardcore")} />}
+                {level?.cheats && <Flag label={t("world.cheats")} />}
+                {level?.modded && <Flag label={t("world.modded")} />}
+              </span>
+            </DetailRow>
+          )}
+
+          {difficulty && (
+            <DetailRow label={t("world.difficulty")}>
+              {level?.difficulty_locked
+                ? t("world.difficultyLocked", { difficulty })
+                : difficulty}
+            </DetailRow>
+          )}
+
+          {day !== null && (
+            <DetailRow label={t("world.age")}>
+              {t("world.day", { day: day.toLocaleString(locale) })}
+            </DetailRow>
+          )}
+
+          {details && details.bytes > 0 && (
+            <DetailRow label={t("world.size")}>{fileSize(details.bytes)}</DetailRow>
+          )}
+
+          {level?.spawn && (
+            <DetailRow label={t("world.spawn")}>
+              <span className="font-mono text-xs">
+                {level.spawn[0]}, {level.spawn[1]}, {level.spawn[2]}
+              </span>
+            </DetailRow>
+          )}
+
+          {level?.seed && (
+            <DetailRow label={t("world.seed")}>
+              <span className="flex min-w-0 items-baseline gap-2">
+                <span className="min-w-0 truncate font-mono text-xs select-all">
+                  {level.seed}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 shrink-0 px-1.5 text-xs text-muted-foreground"
+                  onClick={() => {
+                    copyText(level.seed ?? "")
+                      .then(setCopied)
+                      .catch(() => setCopied(false))
+                  }}
+                >
+                  <Copy data-icon="inline-start" />
+                  {copied ? t("world.copied") : t("world.copySeed")}
+                </Button>
+              </span>
+            </DetailRow>
+          )}
+
+          {level && level.data_packs.length > 0 && (
+            <DetailRow label={t("world.dataPacks")}>
+              <span className="break-words">{level.data_packs.join(", ")}</span>
+            </DetailRow>
+          )}
+        </dl>
+      )}
+
+      {details && !level && (
+        <p className="text-sm text-muted-foreground">{t("world.detailsUnreadable")}</p>
+      )}
+    </section>
   )
 }
 

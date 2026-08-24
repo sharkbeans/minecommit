@@ -1,6 +1,7 @@
 import { HelpCircle, History, Laptop, Lock, Plus } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { GrassBlock } from "@/components/block-icon"
 import { useI18n, type TranslationKey } from "@/contexts/i18n"
 
 /**
@@ -32,7 +33,8 @@ export function Welcome({
 
   return (
     <div className="mx-auto flex h-full max-w-2xl flex-col justify-center gap-8 p-8">
-      <div className="flex flex-col gap-3 text-center">
+      <div className="flex flex-col items-center gap-3 text-center">
+        <GrassBlock className="size-12" />
         <h1 className="text-2xl font-semibold text-balance">{t("welcome.title")}</h1>
         <p className="text-sm leading-relaxed text-pretty text-muted-foreground">
           {t("welcome.body")}

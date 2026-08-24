@@ -14,6 +14,22 @@ impl LocalFsOdb {
     pub fn from_dir(root: PathBuf) -> Self {
         Self { root_dir: root }
     }
+
+    /// How much work a set of keys represents: how many files, and how many
+    /// bytes between them.
+    ///
+    /// This is the denominator of the backup progress bar. A key that cannot be
+    /// measured still counts as a file, because it is still going to be read;
+    /// only its size is unknown, and a missing size understates the total
+    /// rather than inventing one.
+    pub fn weigh(&self, keys: &[String]) -> (u64, u64) {
+        let bytes = keys
+            .iter()
+            .filter_map(|key| fs::metadata(self.root_dir.join(key_to_native(key))).ok())
+            .map(|meta| meta.len())
+            .sum();
+        (keys.len() as u64, bytes)
+    }
 }
 
 // Convert a /-separated ODB key into a native PathBuf for filesystem operations.
@@ -65,7 +81,7 @@ impl OdbReader for LocalFsOdb {
             .context("failed to read file from odb")?;
         // Every handler reaches a save file through here, including the
         // parallel readers, so this is the one place that sees the whole job.
-        crate::progress::advance(1);
+        crate::progress::advance(1, bytes.len() as u64);
         Ok(bytes)
     }
 
@@ -101,9 +117,10 @@ impl OdbWriter for LocalFsOdb {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create parent directory for key {key:?}"))?;
         }
+        let written = value.as_ref().len() as u64;
         fs::write(&path, value)
             .with_context(|| format!("failed to write file to odb at {path:?}"))?;
-        crate::progress::advance(1);
+        crate::progress::advance(1, written);
         Ok(())
     }
 
@@ -119,9 +136,10 @@ impl OdbWriter for LocalFsOdb {
                     format!("failed to create parent directory for key {key:?}")
                 })?;
             }
+            let written = value.as_ref().len() as u64;
             fs::write(&path, value)
                 .with_context(|| format!("failed to write file to odb at {path:?}"))?;
-            crate::progress::advance(1);
+            crate::progress::advance(1, written);
             Ok::<(), anyhow::Error>(())
         })
     }

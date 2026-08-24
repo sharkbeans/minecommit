@@ -3553,6 +3553,7 @@ dependencies = [
  "log",
  "rayon",
  "serde",
+ "serde_json",
  "simdnbt",
  "tempfile",
 ]

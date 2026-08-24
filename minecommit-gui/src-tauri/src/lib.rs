@@ -1,6 +1,7 @@
 use chrono::{DateTime, Local};
 use log::{LevelFilter, Log, Metadata, Record};
 use minecommit::{
+    level::{read_world, LevelInfo},
     sync::{
         backup_message_with_device, current_device_name, lock_inactive_world, restore_commit,
         world_is_busy,
@@ -312,31 +313,50 @@ fn commit_blocking(
 }
 
 /// How much of a backup or restore has been done, for the progress bar.
+///
+/// Both counts are sent: bytes drive the bar, because a world is a few hundred
+/// large region files next to a few thousand tiny ones and a bar driven by the
+/// file count races and stalls. The file count is still worth showing beside
+/// it, since "412 of 3,204 files" says something a size does not.
 #[derive(Debug, Clone, Copy, Serialize)]
 struct Progress {
-    done: u64,
-    total: u64,
+    /// "reading", "writing", "downloading" or "uploading". Matches `Phase` in
+    /// `cloud.ts`, which chooses the wording from it.
+    phase: &'static str,
+    files_done: u64,
+    files_total: u64,
+    bytes_done: u64,
+    /// Zero when the size of the job cannot be known ahead of time, which is
+    /// the case for a network transfer: Git says how much has arrived but
+    /// never how much is coming.
+    bytes_total: u64,
+}
+
+impl From<minecommit::progress::Report> for Progress {
+    fn from(report: minecommit::progress::Report) -> Self {
+        Self {
+            phase: report.phase.as_str(),
+            files_done: report.files_done,
+            files_total: report.files_total,
+            bytes_done: report.bytes_done,
+            bytes_total: report.bytes_total,
+        }
+    }
 }
 
 /// Push whatever the running work has produced to the window: log lines, and
 /// how far it has got.
 ///
-/// `reported` is the last count sent, so a job that spends a minute on one
+/// `reported` is the last reading sent, so a job that spends a minute on one
 /// large region file does not emit the same number twenty times a second.
-fn pump(app: &tauri::AppHandle, reported: &mut (u64, u64)) {
+fn pump(app: &tauri::AppHandle, reported: &mut Option<minecommit::progress::Report>) {
     for entry in &take_logs() {
         let _ = app.emit("commit-log", entry);
     }
-    let now = minecommit::progress::snapshot();
-    if now != *reported {
-        *reported = now;
-        let _ = app.emit(
-            "backup-progress",
-            Progress {
-                done: now.0,
-                total: now.1,
-            },
-        );
+    let now = minecommit::progress::report();
+    if *reported != Some(now) {
+        *reported = Some(now);
+        let _ = app.emit("backup-progress", Progress::from(now));
     }
 }
 
@@ -366,7 +386,7 @@ async fn perform_commit(
     let app_clone = app.clone();
 
     let log_task = tauri::async_runtime::spawn_blocking(move || {
-        let mut reported = (0u64, 0u64);
+        let mut reported = None;
         while running_clone.load(Ordering::Relaxed) {
             pump(&app_clone, &mut reported);
             std::thread::sleep(Duration::from_millis(50));
@@ -446,7 +466,7 @@ async fn perform_restore(
     let app_clone = app.clone();
 
     let log_task = tauri::async_runtime::spawn_blocking(move || {
-        let mut reported = (0u64, 0u64);
+        let mut reported = None;
         while running_clone.load(Ordering::Relaxed) {
             pump(&app_clone, &mut reported);
             std::thread::sleep(Duration::from_millis(50));
@@ -526,7 +546,7 @@ async fn perform_push(
     let app_clone = app.clone();
 
     let log_task = tauri::async_runtime::spawn_blocking(move || {
-        let mut reported = (0u64, 0u64);
+        let mut reported = None;
         while running_clone.load(Ordering::Relaxed) {
             pump(&app_clone, &mut reported);
             std::thread::sleep(Duration::from_millis(50));
@@ -588,7 +608,7 @@ async fn perform_pull(
     let app_clone = app.clone();
 
     let log_task = tauri::async_runtime::spawn_blocking(move || {
-        let mut reported = (0u64, 0u64);
+        let mut reported = None;
         while running_clone.load(Ordering::Relaxed) {
             pump(&app_clone, &mut reported);
             std::thread::sleep(Duration::from_millis(50));
@@ -1126,7 +1146,7 @@ async fn clone_save_from_cloud(
     let running_clone = running.clone();
     let app_clone = app.clone();
     let log_task = tauri::async_runtime::spawn_blocking(move || {
-        let mut reported = (0u64, 0u64);
+        let mut reported = None;
         while running_clone.load(Ordering::Relaxed) {
             pump(&app_clone, &mut reported);
             std::thread::sleep(Duration::from_millis(50));
@@ -1278,6 +1298,12 @@ pub struct FoundWorld {
     pub path: String,
     /// When level.dat was last written, ISO 8601. `None` if it cannot be read.
     pub last_played: Option<String>,
+    /// The name the world shows in Minecraft's own list, when it differs from
+    /// the folder name. Renaming a world in game leaves its folder alone, so
+    /// this is often the only name the player recognises.
+    pub level_name: Option<String>,
+    /// The Minecraft version that last saved it, "1.21.4".
+    pub version: Option<String>,
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -1349,10 +1375,21 @@ fn list_worlds_in_folder(folder: String) -> Result<Vec<FoundWorld>, String> {
             .and_then(|meta| meta.modified())
             .ok()
             .map(|time| DateTime::<Local>::from(time).to_rfc3339());
+        // level.dat is a few kilobytes, and reading it is what lets the picker
+        // show a version beside each world. A world whose level.dat cannot be
+        // read is still listed: it is still a world, and refusing to offer it
+        // would be the worse failure.
+        let level_name = read_world(&path).ok();
+        let folder = entry.file_name().to_string_lossy().to_string();
         worlds.push(FoundWorld {
-            name: entry.file_name().to_string_lossy().to_string(),
+            name: folder.clone(),
             path: path.to_string_lossy().to_string(),
             last_played,
+            level_name: level_name
+                .as_ref()
+                .and_then(|info| info.level_name.clone())
+                .filter(|name| *name != folder),
+            version: level_name.and_then(|info| info.version_name),
         });
     }
     worlds.sort_by(|a, b| b.last_played.cmp(&a.last_played));
@@ -1686,6 +1723,42 @@ pub struct WorldState {
     pub last_played: Option<String>,
 }
 
+/// What a world says about itself, beyond its backup state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldDetails {
+    /// What `level.dat` holds, or `None` when it cannot be read -- an old
+    /// format, a mod's own layout, or a world mid-save. The panel simply shows
+    /// less in that case.
+    pub level: Option<LevelInfo>,
+    /// Total size of the world folder on disk.
+    pub bytes: u64,
+}
+
+/// Read a world's own details: version, game mode, seed, size on disk.
+///
+/// Never fails. Nothing here is needed to back a world up, so a world that
+/// cannot describe itself must still be usable rather than showing an error
+/// where its version would be.
+#[tauri::command]
+async fn world_details(save_dir: String) -> WorldDetails {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = Path::new(&save_dir);
+        WorldDetails {
+            level: read_world(dir)
+                .map_err(|error| log::debug!("Could not read {save_dir}/level.dat: {error:#}"))
+                .ok(),
+            // Thousands of metadata reads on a large world, which is why this
+            // is off the main thread.
+            bytes: directory_bytes(dir),
+        }
+    })
+    .await
+    .unwrap_or(WorldDetails {
+        level: None,
+        bytes: 0,
+    })
+}
+
 #[tauri::command]
 fn world_state(save_dir: String) -> WorldState {
     let dir = Path::new(&save_dir);
@@ -1793,7 +1866,7 @@ async fn backup_and_upload(
     let app_clone = app.clone();
 
     let log_task = tauri::async_runtime::spawn_blocking(move || {
-        let mut reported = (0u64, 0u64);
+        let mut reported = None;
         while running_clone.load(Ordering::Relaxed) {
             pump(&app_clone, &mut reported);
             std::thread::sleep(Duration::from_millis(50));
@@ -2455,6 +2528,7 @@ pub fn run() {
             list_history,
             device_name,
             world_state,
+            world_details,
             get_saves_folder,
             set_saves_folder,
             backup_and_upload,
@@ -2544,6 +2618,12 @@ mod tests {
         assert_eq!(worlds.len(), 1);
         assert_eq!(worlds[0].name, "My World");
         assert!(worlds[0].last_played.is_some());
+        // That level.dat is not readable NBT, and the world is offered anyway.
+        // Backing a world up does not depend on it describing itself, so a
+        // world whose format this build cannot parse must never drop out of the
+        // list -- that would be a world silently left unprotected.
+        assert_eq!(worlds[0].version, None);
+        assert_eq!(worlds[0].level_name, None);
     }
 
     #[test]

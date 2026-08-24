@@ -11,11 +11,23 @@ pub struct LocalGitOdb {
     repo: gix::ThreadSafeRepository,
     /// Accumulated blobs not yet committed: path → sha1.
     pending: HashMap<String, String>,
-    /// Blob path → oid, populated once per commit.
-    path_to_oid: HashMap<String, gix::ObjectId>,
+    /// Blob path → oid and size in bytes, populated once per commit.
+    path_to_oid: HashMap<String, (gix::ObjectId, u64)>,
 }
 
 impl LocalGitOdb {
+    /// How much work restoring this commit represents: how many stored files,
+    /// and how many bytes between them.
+    ///
+    /// This is the denominator of the restore progress bar, and it is free:
+    /// the sizes come from the same `ls-tree` that located the blobs.
+    pub fn weight(&self) -> (u64, u64) {
+        (
+            self.path_to_oid.len() as u64,
+            self.path_to_oid.values().map(|(_, size)| size).sum(),
+        )
+    }
+
     pub fn new(git_dir: PathBuf) -> Result<Self> {
         Ok(Self {
             repo: gix::open(git_dir.to_owned())
@@ -140,37 +152,56 @@ fn build_tree(
         .to_string())
 }
 
-/// Build a path → oid map for a commit using `git ls-tree -r`.
+/// Build a path → (oid, size) map for a commit using `git ls-tree -r -l`.
+///
+/// `-z` is what makes this safe on the paths a modded world can contain:
+/// without it Git quotes and backslash-escapes any path holding a space, a
+/// quote or a non-ASCII character, and the escaped name would be restored as a
+/// file the world never had. `-l` adds the blob size, which the progress bar
+/// uses as its denominator and which costs nothing to ask for here.
 fn build_path_to_oid(
     git_dir: &PathBuf,
     commit_sha: &str,
-) -> Result<HashMap<String, gix::ObjectId>> {
-    let cmd = git_cmd(git_dir, ["ls-tree", "-r", "--", commit_sha]);
+) -> Result<HashMap<String, (gix::ObjectId, u64)>> {
+    let cmd = git_cmd(git_dir, ["ls-tree", "-r", "-l", "-z", "--", commit_sha]);
     Ok(exec(cmd, None)
         .context("failed to run ls-tree")?
-        .lines()
-        .filter_map(|line| {
-            let oid_str = line.get(12..52)?;
-            let path = line.get(53..)?.trim();
-            let oid: gix::ObjectId = oid_str.parse().ok()?;
-            Some((path.to_string(), oid))
+        .split('\0')
+        .filter(|record| !record.is_empty())
+        .filter_map(|record| {
+            // "<mode> SP <type> SP <oid> SP <size> TAB <path>", where the size
+            // is right-aligned in a fixed-width field and so may carry leading
+            // spaces. A tree entry has "-" for its size, but `-r` reports only
+            // blobs.
+            let (meta, path) = record.split_once('\t')?;
+            let mut fields = meta.split_whitespace();
+            let _mode = fields.next()?;
+            let _kind = fields.next()?;
+            let oid: gix::ObjectId = fields.next()?.parse().ok()?;
+            let size = fields.next()?.parse().unwrap_or(0);
+            Some((path.to_string(), (oid, size)))
         })
         .collect())
 }
 
 impl OdbReader for LocalGitOdb {
     fn get(&self, key: &str) -> Result<Vec<u8>> {
-        let oid = self
+        let (oid, _) = self
             .path_to_oid
             .get(key)
             .with_context(|| format!("key not found: {key}"))?;
-        Ok(self
+        let data = self
             .repo
             .to_thread_local()
             .find_blob(*oid)
             .with_context(|| format!("failed to find blob for key: {key}"))?
             .data
-            .to_vec())
+            .to_vec();
+        // A restore reaches every stored file through here, so this is the one
+        // place that sees the whole job. Nothing reads the repository while a
+        // backup is being written, so this only ever counts a restore.
+        crate::progress::advance(1, data.len() as u64);
+        Ok(data)
     }
 
     fn get_par(&self, keys: &[&str]) -> Result<Vec<Vec<u8>>> {
@@ -178,15 +209,17 @@ impl OdbReader for LocalGitOdb {
         let path_to_oid = &self.path_to_oid;
         keys.into_par_iter()
             .map(|key| {
-                let oid = path_to_oid
+                let (oid, _) = path_to_oid
                     .get(*key)
                     .with_context(|| format!("key not found: {key}"))?;
-                Ok(repo
+                let data = repo
                     .to_thread_local()
                     .find_blob(*oid)
                     .with_context(|| format!("failed to find blob for key: {key}"))?
                     .data
-                    .to_vec())
+                    .to_vec();
+                crate::progress::advance(1, data.len() as u64);
+                Ok(data)
             })
             .collect()
     }
@@ -296,6 +329,51 @@ mod tests {
         let odb = LocalGitOdb::from_commit(repo.path().to_path_buf(), commit_sha).unwrap();
         let got = odb.get("src/hello.txt").unwrap();
         assert_eq!(got, data);
+    }
+
+    /// A world folder is not all ASCII. Data packs, resource packs and mods
+    /// put spaces, quotes and accented letters into file names, and Git quotes
+    /// and backslash-escapes every one of those in `ls-tree` output unless it
+    /// is asked for NUL-terminated records. Reading the escaped form back would
+    /// restore a file under a name the world never had -- and leave the real
+    /// one missing.
+    #[test]
+    fn a_file_whose_name_git_would_escape_still_comes_back_under_its_own_name() {
+        let repo = init_bare_repo();
+        let mut odb = LocalGitOdb::from_commit(repo.path().to_path_buf(), String::new()).unwrap();
+
+        let awkward = [
+            "datapacks/My Data Pack/pack.mcmeta",
+            "datapacks/café/data.json",
+            "datapacks/quote\"name/x.json",
+            "datapacks/back\\slash/x.json",
+        ];
+        for (index, key) in awkward.iter().enumerate() {
+            odb.put(key, format!("contents {index}").into_bytes()).unwrap();
+        }
+        let commit = odb.commit(&[] as &[&str], "awkward names", None, None).unwrap();
+
+        let odb = LocalGitOdb::from_commit(repo.path().to_path_buf(), commit).unwrap();
+        for (index, key) in awkward.iter().enumerate() {
+            assert_eq!(
+                odb.get(key).unwrap_or_else(|e| panic!("{key} must restore: {e}")),
+                format!("contents {index}").into_bytes()
+            );
+        }
+    }
+
+    /// The restore bar divides by this, and a zero denominator draws no bar at
+    /// all -- which is what a restore of a large world used to show.
+    #[test]
+    fn a_stored_commit_knows_how_much_work_restoring_it_is() {
+        let repo = init_bare_repo();
+        let mut odb = LocalGitOdb::from_commit(repo.path().to_path_buf(), String::new()).unwrap();
+        odb.put("region/r.0.0.mca", vec![7u8; 4096]).unwrap();
+        odb.put("level.dat", vec![1u8; 900]).unwrap();
+        let commit = odb.commit(&[] as &[&str], "sized", None, None).unwrap();
+
+        let odb = LocalGitOdb::from_commit(repo.path().to_path_buf(), commit).unwrap();
+        assert_eq!(odb.weight(), (2, 4096 + 900));
     }
 
     #[test]
