@@ -16,11 +16,14 @@ pub struct LocalGitOdb {
 }
 
 impl LocalGitOdb {
-    /// How much work restoring this commit represents: how many stored files,
+    /// How much work restoring this commit represents: how many stored pieces,
     /// and how many bytes between them.
     ///
-    /// This is the denominator of the restore progress bar, and it is free:
-    /// the sizes come from the same `ls-tree` that located the blobs.
+    /// The count is the denominator of the restore progress bar. The byte total
+    /// is not, and deliberately: a world is stored one chunk at a time and
+    /// uncompressed, so Git can tell which chunks changed, and one real world
+    /// that takes 3.1 GB in the saves folder is 81 GB of stored pieces. Both
+    /// come free from the same `ls-tree` that located the blobs.
     pub fn weight(&self) -> (u64, u64) {
         (
             self.path_to_oid.len() as u64,
@@ -362,8 +365,8 @@ mod tests {
         }
     }
 
-    /// The restore bar divides by this, and a zero denominator draws no bar at
-    /// all -- which is what a restore of a large world used to show.
+    /// The restore bar divides by the count, and a zero denominator draws no
+    /// bar at all -- which is what a restore of a large world used to show.
     #[test]
     fn a_stored_commit_knows_how_much_work_restoring_it_is() {
         let repo = init_bare_repo();

@@ -165,6 +165,14 @@ pub fn exec_watching_transfer(mut cmd: Command) -> Result<CommandOutput> {
         .join()
         .map_err(|_| anyhow::anyhow!("failed to read stdout from command {cmd:?}"))?;
 
+    // The phase this command opened closes with it. Nothing else sets these two,
+    // so a transfer phase still standing here is one this call started -- and
+    // leaving it standing would keep a finished transfer on screen as a live
+    // one, and hand the next thing to run a bar it never asked for.
+    if matches!(progress::report().phase, Phase::Downloading | Phase::Uploading) {
+        progress::end();
+    }
+
     let stderr = String::from_utf8(stderr).context("Git emitted non-UTF-8 stderr")?;
     for text in stderr.split(['\r', '\n']).filter(|text| !text.is_empty()) {
         log::debug!("stderr: {text:?}");

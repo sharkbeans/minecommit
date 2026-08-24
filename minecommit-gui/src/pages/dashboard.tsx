@@ -50,6 +50,7 @@ import {
   fileSize,
   fractionDone,
   gameModeName,
+  progressReadout,
   inGameDay,
   playedSinceBackup,
   relativeTime,
@@ -57,8 +58,6 @@ import {
   secondsRemaining,
   repoLabel,
   situationOf,
-  sizePair,
-  totalBytes,
   PHASE_TITLE,
   type BackupProgress,
   type BackupResult,
@@ -888,7 +887,10 @@ const SLOW_AFTER_SECONDS = 20
 
 function clock(seconds: number) {
   if (seconds < 60) return `${seconds}s`
-  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`
+  // "167m 43s" is a number the reader has to divide themselves. Past an hour,
+  // say hours.
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`
+  return `${Math.floor(seconds / 3600)}h ${String(Math.floor((seconds % 3600) / 60)).padStart(2, "0")}m`
 }
 
 /**
@@ -911,46 +913,39 @@ function WorkingCard({
 }) {
   const { locale, t } = useI18n()
   const fraction = fractionDone(progress)
-  const total = totalBytes(progress, fraction)
   const phase = progress?.phase ?? "idle"
 
-  // Two clocks. The whole operation's elapsed time is what the player is
-  // waiting out, so that one runs from the moment this card appears. The
-  // estimate has to come from the current phase alone, so that one restarts
-  // whenever the phase does: a backup reads the world and then uploads it, and
-  // timing the upload against the minutes already spent reading would promise
-  // an ending long after the real one.
-  const [seconds, setSeconds] = useState(0)
-  const [phaseSeconds, setPhaseSeconds] = useState(0)
+  // Both clocks are measured in Rust, on a clock that stops while the computer
+  // is asleep. A laptop suspended mid-backup used to come back reporting the
+  // hours it spent asleep as time spent working, and predicting an ending most
+  // of a day away. The window cannot measure this itself either way: its timers
+  // are throttled when it is not on screen, which is exactly when a long backup
+  // is left to run.
+  //
+  // The estimate comes from the current phase alone. A backup reads the world
+  // and then uploads it, and timing the upload against the minutes already
+  // spent reading would promise an ending long after the real one.
+  //
+  // The local timer only fills the gap before the first report arrives, so the
+  // card is never sitting at "0s so far" while work is starting.
+  const [ticks, setTicks] = useState(0)
 
   useEffect(() => {
-    const started = Date.now()
-    const timer = setInterval(
-      () => setSeconds(Math.floor((Date.now() - started) / 1000)),
-      1000
-    )
+    const timer = setInterval(() => setTicks((count) => count + 1), 1000)
     return () => clearInterval(timer)
   }, [])
 
-  useEffect(() => {
-    const started = Date.now()
-    const timer = setInterval(
-      () => setPhaseSeconds(Math.floor((Date.now() - started) / 1000)),
-      1000
-    )
-    return () => clearInterval(timer)
-  }, [phase])
-
-  const left = secondsRemaining(fraction, phaseSeconds)
+  const seconds = progress ? progress.job_seconds : ticks
+  const left = secondsRemaining(fraction, progress?.phase_seconds ?? 0)
 
   const headline = PHASE_TITLE[phase]
-  const counting = phase === "reading" || phase === "writing"
+  // Reading a world walks real files in the saves folder, and saying how many
+  // tells the player something the size does not. Every other phase counts
+  // stored pieces or Git objects, which are not files and must not be called
+  // any -- that count is already the main readout there.
+  const counting = phase === "reading"
 
-  const size = total
-    ? sizePair(progress?.bytes_done ?? 0, total.bytes, locale, total.estimated)
-    : progress && progress.bytes_done > 0
-      ? t("state.downloaded", { size: fileSize(progress.bytes_done) })
-      : ""
+  const size = progressReadout(progress, locale, t)
 
   return (
     <div className="flex flex-col items-center gap-3 rounded-xl border p-8 text-center">
@@ -1014,6 +1009,13 @@ function WorkingCard({
       {seconds >= SLOW_AFTER_SECONDS && busy === "backup" && (
         <p className="max-w-sm text-xs text-balance text-muted-foreground">
           {t("state.backingUpSlow")}
+        </p>
+      )}
+      {/* Half a million pieces for one world is a startling number to read
+          without being told why there are that many. */}
+      {seconds >= SLOW_AFTER_SECONDS && phase === "writing" && (
+        <p className="max-w-sm text-xs text-balance text-muted-foreground">
+          {t("state.restoringSlow")}
         </p>
       )}
       <Button variant="ghost" size="sm" onClick={onShowLog}>

@@ -330,6 +330,12 @@ struct Progress {
     /// the case for a network transfer: Git says how much has arrived but
     /// never how much is coming.
     bytes_total: u64,
+    /// Seconds, from a clock that stops while the computer is asleep. The
+    /// window cannot measure this for itself: its own timers are throttled
+    /// when it is not on screen, which is exactly when a long backup is left
+    /// running.
+    phase_seconds: u64,
+    job_seconds: u64,
 }
 
 impl From<minecommit::progress::Report> for Progress {
@@ -340,6 +346,8 @@ impl From<minecommit::progress::Report> for Progress {
             files_total: report.files_total,
             bytes_done: report.bytes_done,
             bytes_total: report.bytes_total,
+            phase_seconds: report.phase_seconds,
+            job_seconds: report.job_seconds,
         }
     }
 }
@@ -379,6 +387,7 @@ async fn perform_commit(
     // A restore or a download never sets a total, so without this the file
     // count would carry over from whatever ran before it.
     minecommit::progress::end();
+    minecommit::progress::start_job();
 
     // Spawn a blocking thread to periodically drain and emit captured logs
     let running = Arc::new(AtomicBool::new(true));
@@ -459,6 +468,7 @@ async fn perform_restore(
     init_logger();
     take_logs(); // drain stale logs
     minecommit::progress::end();
+    minecommit::progress::start_job();
 
     // Spawn a blocking thread to periodically drain and emit captured logs
     let running = Arc::new(AtomicBool::new(true));
@@ -540,6 +550,7 @@ async fn perform_push(
     init_logger();
     take_logs();
     minecommit::progress::end();
+    minecommit::progress::start_job();
 
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
@@ -602,6 +613,7 @@ async fn perform_pull(
     init_logger();
     take_logs();
     minecommit::progress::end();
+    minecommit::progress::start_job();
 
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
@@ -1087,6 +1099,7 @@ async fn clone_save_from_cloud(
     init_logger();
     take_logs();
     minecommit::progress::end();
+    minecommit::progress::start_job();
 
     let name = name.trim().to_string();
     let save_path = save_path.trim().to_string();
@@ -1866,6 +1879,7 @@ async fn backup_and_upload(
     init_logger();
     take_logs();
     minecommit::progress::end();
+    minecommit::progress::start_job();
 
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();

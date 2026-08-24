@@ -19,6 +19,8 @@
 //! reason.
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::Mutex;
+use std::time::Instant;
 
 /// What the running work is currently doing.
 ///
@@ -84,6 +86,32 @@ static FILES_DONE: AtomicU64 = AtomicU64::new(0);
 static BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static BYTES_DONE: AtomicU64 = AtomicU64::new(0);
 
+/// When the current phase, and the whole job, began.
+///
+/// Measured with the monotonic clock rather than the wall clock, because the
+/// two disagree by hours in the one case that matters: a laptop suspended
+/// mid-backup. `Instant` does not advance while the machine is asleep, and
+/// neither does the work, so the two stay in step -- where a wall clock would
+/// report six hours elapsed for ten minutes of progress and predict an ending
+/// some time next week.
+///
+/// It is also why the clock is kept here and not in the window: a webview
+/// throttles its timers when it is not on screen, which is exactly when a long
+/// backup is left to run.
+static PHASE_STARTED: Mutex<Option<Instant>> = Mutex::new(None);
+static JOB_STARTED: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn seconds_since(clock: &Mutex<Option<Instant>>) -> u64 {
+    clock
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map_or(0, |started| started.elapsed().as_secs())
+}
+
+fn mark(clock: &Mutex<Option<Instant>>, at: Option<Instant>) {
+    *clock.lock().unwrap_or_else(|e| e.into_inner()) = at;
+}
+
 /// Everything known about the running operation at one instant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Report {
@@ -95,6 +123,13 @@ pub struct Report {
     /// the case for a network transfer: Git says how much has arrived but never
     /// how much is coming.
     pub bytes_total: u64,
+    /// Seconds this phase has been running, excluding any time the computer
+    /// spent asleep.
+    pub phase_seconds: u64,
+    /// Seconds since the whole job started, on the same clock. A job runs
+    /// through several phases and pauses between them, so this keeps counting
+    /// while no phase does.
+    pub job_seconds: u64,
 }
 
 impl Report {
@@ -104,9 +139,18 @@ impl Report {
     }
 }
 
+/// Start the clock on a whole job, before its first phase begins.
+///
+/// Every phase after this one restarts the phase clock; this one is what the
+/// player sees as "so far", and survives the gaps between phases.
+pub fn start_job() {
+    mark(&JOB_STARTED, Some(Instant::now()));
+}
+
 /// Start counting a run of `files` files totalling `bytes`. Either total may be
 /// zero, for work whose size is not known ahead of time.
 pub fn begin(phase: Phase, files: u64, bytes: u64) {
+    mark(&PHASE_STARTED, Some(Instant::now()));
     FILES_DONE.store(0, Ordering::Relaxed);
     BYTES_DONE.store(0, Ordering::Relaxed);
     FILES_TOTAL.store(files, Ordering::Relaxed);
@@ -118,6 +162,7 @@ pub fn begin(phase: Phase, files: u64, bytes: u64) {
 
 /// Stop counting, so a finished run does not leave a stale bar behind.
 pub fn end() {
+    mark(&PHASE_STARTED, None);
     PHASE.store(Phase::Idle.code(), Ordering::Relaxed);
     FILES_TOTAL.store(0, Ordering::Relaxed);
     FILES_DONE.store(0, Ordering::Relaxed);
@@ -155,6 +200,8 @@ pub fn report() -> Report {
         files_total: FILES_TOTAL.load(Ordering::Relaxed),
         bytes_done: BYTES_DONE.load(Ordering::Relaxed),
         bytes_total: BYTES_TOTAL.load(Ordering::Relaxed),
+        phase_seconds: seconds_since(&PHASE_STARTED),
+        job_seconds: seconds_since(&JOB_STARTED),
     }
 }
 
@@ -238,6 +285,49 @@ mod tests {
         );
         assert_eq!((stopped.files_done, stopped.bytes_done), (0, 0));
         assert_eq!((stopped.files_total, stopped.bytes_total), (0, 0));
+    }
+
+    /// A laptop suspended mid-backup is the case the clock has to survive. The
+    /// wall clock counts the hours it spent asleep; the work does not, and a
+    /// bar that divides one by the other predicts an ending some time next
+    /// week. One real restore reported 167 minutes elapsed for about ten
+    /// minutes of work, and 4.9 hours still to go.
+    ///
+    /// Sleep cannot be staged in a test, but the clock underneath it can be
+    /// checked for the property that makes it survive: `Instant` is monotonic
+    /// and does not advance while the machine is suspended, where `SystemTime`
+    /// does both. This guards against someone swapping one for the other.
+    #[test]
+    fn the_clock_is_one_that_does_not_run_while_the_computer_sleeps() {
+        let source = include_str!("progress.rs");
+        let body = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the module has a body before its tests");
+        assert!(
+            !body.contains("SystemTime"),
+            "elapsed time must come from Instant: SystemTime counts the hours a \
+             suspended laptop spent asleep as though they were work"
+        );
+
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        end();
+        assert_eq!(report().phase_seconds, 0, "no phase, no phase clock");
+
+        start_job();
+        begin(Phase::Reading, 1, 1);
+        let running = report();
+        assert!(running.phase_seconds < 2, "a phase starts from now, not from whenever");
+        assert!(running.job_seconds < 2);
+
+        // The job clock outlives the phase: a backup reads, repacks and then
+        // uploads, and "so far" must not restart at each step.
+        end();
+        assert_eq!(report().phase_seconds, 0);
+        assert!(
+            report().job_seconds < 2,
+            "the job clock keeps running between phases"
+        );
     }
 
     /// Git counts a transfer up from zero and revises its own object total as

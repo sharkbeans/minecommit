@@ -1049,6 +1049,38 @@ mod tests {
     }
 
     #[test]
+    /// An upload and a download draw a bar from Git's own transfer counters.
+    /// Whoever starts that bar has to stop it: a phase left standing keeps a
+    /// finished transfer on screen as a live one, and hands whatever runs next
+    /// a bar it never asked for -- including, before this, every unrelated test
+    /// in this file that happened to run at the same moment.
+    #[test]
+    fn a_finished_transfer_leaves_no_bar_behind() {
+        use crate::progress;
+
+        let _guard = progress::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        progress::end();
+
+        let remote = init_bare();
+        let device = init_bare();
+        let initial = commit(device.path(), None, "initial");
+        set_branch(device.path(), &initial);
+        let sync = configured(device.path(), remote.path());
+
+        sync.push().expect("push");
+        assert!(
+            !progress::report().running(),
+            "an upload that has finished must not still be counting"
+        );
+
+        sync.fetch().expect("fetch");
+        assert!(
+            !progress::report().running(),
+            "and neither must a download"
+        );
+    }
+
+    #[test]
     fn remote_ahead_fast_forwards_without_merge() {
         let remote = init_bare();
         let device_a = init_bare();

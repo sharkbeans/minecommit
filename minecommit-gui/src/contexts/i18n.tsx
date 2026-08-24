@@ -143,6 +143,9 @@ const en = {
   "state.elapsed": "{time} so far",
   "state.filesDone": "{done} of {total} files",
   "state.filesWritten": "{done} files so far",
+  "state.piecesDone": "{done} of {total} pieces",
+  "state.restoringSlow":
+    "A world is stored in many small pieces, so only what you changed has to be saved each time. That is why there are so many — putting them back is one pass through all of them.",
   "state.downloaded": "{size} so far",
   "state.secondsLeft": "about {seconds} seconds left",
   "state.minutesLeft": "about {minutes} min left",
@@ -527,6 +530,9 @@ const zhCN: Record<TranslationKey, string> = {
   "state.elapsed": "已用 {time}",
   "state.filesDone": "{total} 个文件中的第 {done} 个",
   "state.filesWritten": "已处理 {done} 个文件",
+  "state.piecesDone": "{total} 块中的第 {done} 块",
+  "state.restoringSlow":
+    "存档是拆成很多小块保存的，这样每次只需要存你改动过的部分。所以块数才会这么多 —— 还原就是把它们全部走一遍。",
   "state.downloaded": "已传 {size}",
   "state.secondsLeft": "大约还剩 {seconds} 秒",
   "state.minutesLeft": "大约还剩 {minutes} 分钟",

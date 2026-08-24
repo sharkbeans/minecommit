@@ -124,8 +124,16 @@ impl Config {
         // it writes to disk: a region file is reassembled from hundreds of
         // stored chunks into one file, so counting the writes would sit at zero
         // for minutes and then jump.
-        let (files, bytes) = git.weight();
-        progress::begin(progress::Phase::Writing, files, bytes);
+        //
+        // Counted in pieces, and deliberately not in bytes. A world is stored
+        // one chunk at a time and uncompressed, so that Git can tell which
+        // chunks changed; on disk those same chunks are packed into region
+        // files. One real world measured 3.1 GB in the saves folder, 1.9 GB as
+        // a backup, and 81 GB as stored pieces. The last of those is a true
+        // number and a useless one -- nobody has an 81 GB world -- so the count
+        // is what is offered, and it is honest about what it counts.
+        let (pieces, _) = git.weight();
+        progress::begin(progress::Phase::Writing, pieces, 0);
 
         let result = (|| {
             for crafter in CrafterImpl::get_crafters(self.extra_patterns, self.ignore_patterns) {

@@ -172,6 +172,27 @@ export interface BackupProgress {
   bytes_done: number
   /** Zero when the size of the job is not knowable, as during a transfer. */
   bytes_total: number
+  /** Seconds, from a clock that stops while the computer is asleep. */
+  phase_seconds: number
+  job_seconds: number
+}
+
+/**
+ * Whether this phase's byte count is a size a player would recognise.
+ *
+ * Reading a world measures the world folder, and a transfer measures what
+ * actually crosses the network -- both are sizes somebody could check for
+ * themselves. Restoring is different: a world is stored one chunk at a time and
+ * uncompressed, so Git can tell which chunks changed, and the same world that
+ * takes 3.1 GB in the saves folder is 81 GB of stored pieces. That is a true
+ * number and a useless one, so a restore is counted in pieces instead.
+ */
+const BYTES_ARE_A_SIZE: Record<Phase, boolean> = {
+  idle: false,
+  reading: true,
+  writing: false,
+  downloading: true,
+  uploading: true,
 }
 
 /** The headline for each phase. Only "idle" has none, and never shows. */
@@ -219,10 +240,35 @@ export function totalBytes(
   progress: BackupProgress | null,
   fraction: number | null
 ): { bytes: number; estimated: boolean } | null {
-  if (!progress) return null
+  if (!progress || !BYTES_ARE_A_SIZE[progress.phase]) return null
   if (progress.bytes_total > 0) return { bytes: progress.bytes_total, estimated: false }
   if (fraction === null || fraction < 0.05 || progress.bytes_done <= 0) return null
   return { bytes: Math.round(progress.bytes_done / fraction), estimated: true }
+}
+
+/**
+ * The figure shown beside the percentage: how much of the job is done, in
+ * whichever unit this phase is honestly measured in.
+ */
+export function progressReadout(
+  progress: BackupProgress | null,
+  locale: string,
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string
+): string {
+  if (!progress) return ""
+  if (!BYTES_ARE_A_SIZE[progress.phase]) {
+    if (progress.files_total <= 0) return ""
+    return t("state.piecesDone", {
+      done: progress.files_done.toLocaleString(locale),
+      total: progress.files_total.toLocaleString(locale),
+    })
+  }
+  const total = totalBytes(progress, fractionDone(progress))
+  if (total) return sizePair(progress.bytes_done, total.bytes, locale, total.estimated)
+  // A transfer that has not moved enough yet for its size to be worth guessing.
+  return progress.bytes_done > 0
+    ? t("state.downloaded", { size: fileSize(progress.bytes_done) })
+    : ""
 }
 
 const SIZE_UNITS = ["B", "KB", "MB", "GB", "TB"]
