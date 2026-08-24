@@ -1439,6 +1439,9 @@ pub struct OldCopy {
     /// When the copy was set aside.
     pub taken: Option<String>,
     pub bytes: u64,
+    /// Whether it is sitting among the worlds, where Minecraft lists it as one.
+    /// A copy tucked away in a snapshots folder is only taking up space.
+    pub in_saves_folder: bool,
 }
 
 /// Add up everything under a directory. A world is mostly small region files,
@@ -1457,39 +1460,98 @@ fn directory_bytes(dir: &Path) -> u64 {
         .sum()
 }
 
-/// The copies an earlier restore left in the saves folder.
+/// Where a restore is allowed to have left a copy.
+///
+/// Three places, because three different versions of this program chose
+/// differently and every one of them is still on somebody's disk: beside the
+/// world in the saves folder, which is what restores did before 0.11; in a
+/// `snapshots` folder next to the world's backup repository, which is where a
+/// restore puts them now; and in `minecommit/snapshots`, which is where tidying
+/// them moves them to.
+///
+/// Only these. The list is what decides which folders may later be moved or
+/// deleted, so it has to be built from what this program does, never from what
+/// a folder happens to be called.
+fn snapshot_locations(folder: &Path, tracked_repos: &[PathBuf]) -> Vec<PathBuf> {
+    let mut places = vec![folder.to_path_buf(), tidy_destination(folder)];
+    for repo in tracked_repos {
+        if let Some(parent) = repo.parent() {
+            places.push(parent.join("snapshots"));
+        }
+    }
+    places.sort();
+    places.dedup();
+    places
+}
+
+/// Where tidying moves copies to: out of the saves folder entirely, so
+/// Minecraft stops listing them.
+fn tidy_destination(folder: &Path) -> PathBuf {
+    folder
+        .parent()
+        .unwrap_or(folder)
+        .join("minecommit")
+        .join("snapshots")
+}
+
+/// The backup repository of every world being looked after.
+fn tracked_repo_paths(state: &tauri::State<AppState>) -> Vec<PathBuf> {
+    state
+        .saves
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|save| PathBuf::from(&save.repo_path))
+        .collect()
+}
+
+/// The copies an earlier restore left behind.
 ///
 /// These hold a level.dat, so Minecraft lists every one of them in the game as a
 /// world of its own -- which is why they have to be findable and clearable from
 /// here rather than left for the player to work out in a file manager.
 #[tauri::command]
-async fn list_old_copies(folder: String) -> Result<Vec<OldCopy>, String> {
+async fn list_old_copies(
+    state: tauri::State<'_, AppState>,
+    folder: String,
+) -> Result<Vec<OldCopy>, String> {
+    let repos = tracked_repo_paths(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let dir = Path::new(&folder);
-        if !dir.is_dir() {
-            return Ok(Vec::new());
-        }
+        let saves = Path::new(&folder);
         let mut copies = Vec::new();
-        for entry in fs::read_dir(dir).map_err(|e| format!("Could not read {folder}: {e}"))? {
-            let Ok(entry) = entry else { continue };
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !path.is_dir() || !is_restore_snapshot(&name) {
+        for place in snapshot_locations(saves, &repos) {
+            // Only the saves folder is expected to exist; the rest are made on
+            // demand, and a missing one simply holds nothing.
+            let Ok(entries) = fs::read_dir(&place) else {
                 continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !path.is_dir() || !is_restore_snapshot(&name) {
+                    continue;
+                }
+                let taken = entry
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .map(|time| DateTime::<Local>::from(time).to_rfc3339());
+                copies.push(OldCopy {
+                    world: snapshot_world(&name).unwrap_or_else(|| name.clone()),
+                    path: path.to_string_lossy().to_string(),
+                    taken,
+                    bytes: directory_bytes(&path),
+                    in_saves_folder: place == saves,
+                });
             }
-            let taken = entry
-                .metadata()
-                .and_then(|meta| meta.modified())
-                .ok()
-                .map(|time| DateTime::<Local>::from(time).to_rfc3339());
-            copies.push(OldCopy {
-                world: snapshot_world(&name).unwrap_or_else(|| name.clone()),
-                path: path.to_string_lossy().to_string(),
-                taken,
-                bytes: directory_bytes(&path),
-            });
         }
-        copies.sort_by(|a, b| b.taken.cmp(&a.taken));
+        // The ones Minecraft is showing come first: they are the ones causing a
+        // problem rather than merely taking up room.
+        copies.sort_by(|a, b| {
+            b.in_saves_folder
+                .cmp(&a.in_saves_folder)
+                .then_with(|| b.taken.cmp(&a.taken))
+        });
         Ok(copies)
     })
     .await
@@ -1502,7 +1564,7 @@ async fn list_old_copies(folder: String) -> Result<Vec<OldCopy>, String> {
 /// delete whole worlds. Everything below is a way somebody's save could end up
 /// on the wrong end of that, so each is checked rather than assumed.
 fn checked_snapshot(
-    folder: &Path,
+    places: &[PathBuf],
     tracked_worlds: &[PathBuf],
     path: &str,
 ) -> Result<PathBuf, String> {
@@ -1515,8 +1577,12 @@ fn checked_snapshot(
     if !is_restore_snapshot(&name) {
         return Err(format!("{name} is not a copy MineCommit made"));
     }
-    if path.parent() != Some(folder) {
-        return Err(format!("{name} is not in the saves folder"));
+    // The folder has to be one this program itself puts copies in. A copy is
+    // recognised by its name, and a name is something anything can write, so
+    // the location is what keeps a "copy" somewhere else on the disk from being
+    // moved or erased.
+    if !path.parent().is_some_and(|parent| places.iter().any(|place| place == parent)) {
+        return Err(format!("{name} is not where MineCommit keeps its copies"));
     }
 
     // symlink_metadata, not metadata: a link pointing at a real world reads as
@@ -1567,20 +1633,30 @@ async fn tidy_old_copies(
     paths: Vec<String>,
 ) -> Result<String, String> {
     let tracked = tracked_world_paths(&state);
+    let repos = tracked_repo_paths(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let saves = Path::new(&folder);
-        let destination = saves
-            .parent()
-            .unwrap_or(saves)
-            .join("minecommit")
-            .join("snapshots");
+        let places = snapshot_locations(saves, &repos);
+        let destination = tidy_destination(saves);
         fs::create_dir_all(&destination)
             .map_err(|e| format!("Could not make {}: {e}", destination.display()))?;
 
         for path in &paths {
-            let from = checked_snapshot(saves, &tracked, path)?;
+            let from = checked_snapshot(&places, &tracked, path)?;
+            // A copy already out of the saves folder has nowhere better to go,
+            // and renaming it onto itself would destroy it.
+            if from.parent() == Some(destination.as_path()) {
+                continue;
+            }
             let name = from.file_name().unwrap_or_default();
             let to = destination.join(name);
+            if to.exists() {
+                return Err(format!(
+                    "{} is already in {}",
+                    name.to_string_lossy(),
+                    destination.display()
+                ));
+            }
             fs::rename(&from, &to).map_err(|e| {
                 format!("Could not move {} out of the saves folder: {e}", name.to_string_lossy())
             })?;
@@ -1599,11 +1675,12 @@ async fn delete_old_copies(
     paths: Vec<String>,
 ) -> Result<usize, String> {
     let tracked = tracked_world_paths(&state);
+    let repos = tracked_repo_paths(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let saves = Path::new(&folder);
+        let places = snapshot_locations(Path::new(&folder), &repos);
         let mut removed = 0;
         for path in &paths {
-            let target = checked_snapshot(saves, &tracked, path)?;
+            let target = checked_snapshot(&places, &tracked, path)?;
             fs::remove_dir_all(&target)
                 .map_err(|e| format!("Could not delete {}: {e}", target.display()))?;
             removed += 1;
@@ -2750,6 +2827,46 @@ mod tests {
         }
     }
 
+    /// A restore keeps the world it replaced. Where it keeps it has changed
+    /// three times, and every version's choice is still on somebody's disk --
+    /// but the search for them only ever looked in the saves folder, so from
+    /// 0.11 onwards MineCommit made copies it could not afterwards find. One
+    /// real machine had 9.4 GB of them, in two folders, none of which the app
+    /// ever mentioned.
+    #[test]
+    fn every_place_a_restore_can_leave_a_copy_is_looked_in() {
+        let saves = Path::new("/home/p/.minecraft/saves");
+        // A Prism instance keeps the backups beside the worlds; a plain install
+        // keeps them a level up. Both layouts exist and both leave copies.
+        let repos = vec![
+            PathBuf::from("/home/p/.minecraft/saves/My World.git"),
+            PathBuf::from("/home/p/.minecraft/minecommit/Other.git"),
+        ];
+
+        let places = snapshot_locations(saves, &repos);
+
+        for expected in [
+            // Where restores before 0.11 left them: beside the world itself.
+            "/home/p/.minecraft/saves",
+            // Where a restore leaves them now: beside that world's backups.
+            "/home/p/.minecraft/saves/snapshots",
+            "/home/p/.minecraft/minecommit/snapshots",
+            // Where tidying moves them to.
+            "/home/p/.minecraft/minecommit/snapshots",
+        ] {
+            assert!(
+                places.contains(&PathBuf::from(expected)),
+                "{expected} is a place a copy can be, and must be looked in:\n{places:#?}"
+            );
+        }
+
+        assert_eq!(
+            places.len(),
+            3,
+            "and nowhere else, since this list also decides what may be erased:\n{places:#?}"
+        );
+    }
+
     /// Everything `tidy_old_copies` and `delete_old_copies` are allowed to
     /// touch passes through `checked_snapshot` first. These are the ways a real
     /// world could reach it, and every one of them has to be turned away: a
@@ -2772,17 +2889,32 @@ mod tests {
         let empty = saves.path().join("Hollow.1787384127276.snapshot");
         fs::create_dir(&empty).unwrap();
 
+        // Copies also live in a snapshots folder beside the world's backups,
+        // which is where every restore since 0.11 has put them.
+        let tucked_away = saves.path().join("snapshots");
+        fs::create_dir_all(&tucked_away).unwrap();
+        let stored = world(&tucked_away, "My World.1787414577259.snapshot");
+
         let tracked = vec![real.clone()];
-        let ok = |p: &Path| checked_snapshot(saves.path(), &tracked, p.to_str().unwrap());
+        let places = vec![saves.path().to_path_buf(), tucked_away.clone()];
+        let ok = |p: &Path| checked_snapshot(&places, &tracked, p.to_str().unwrap());
 
         assert!(ok(&copy).is_ok(), "our own copy is the one thing allowed");
+        assert!(
+            ok(&stored).is_ok(),
+            "and so is one already moved out of the way, or it can never be cleared"
+        );
 
         for (path, why) in [
             (&real, "a tracked world must never be touched"),
-            (&outside, "a path outside the saves folder must be refused"),
+            (&outside, "a path outside the places we keep copies must be refused"),
             (&named_like_one, "a world merely named like a copy must be refused"),
             (&empty, "a folder holding no world is not a copy of one"),
             (&saves.path().join("gone.1787384127276.snapshot"), "a copy already removed"),
+            (
+                &tucked_away.join("nested").join("Deep.1787384127276.snapshot"),
+                "a copy nested deeper than we ever put one",
+            ),
         ] {
             assert!(ok(path).is_err(), "{why}: {}", path.display());
         }

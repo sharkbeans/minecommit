@@ -51,6 +51,8 @@ export interface OldCopy {
   path: string
   taken: string | null
   bytes: number
+  /** True while it sits among the worlds, where Minecraft lists it as one. */
+  in_saves_folder: boolean
 }
 
 /** "4.2 GB" -- coarse on purpose; the point is whether it is worth clearing. */

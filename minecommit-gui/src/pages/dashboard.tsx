@@ -153,7 +153,7 @@ export function DashboardPage() {
   const [signInOpen, setSignInOpen] = useState(false)
   const [guideOpen, setGuideOpen] = useState(false)
   const [copiesOpen, setCopiesOpen] = useState(false)
-  const [oldCopies, setOldCopies] = useState(0)
+  const [oldCopies, setOldCopies] = useState<OldCopy[]>([])
 
   /* Saves folder ------------------------------------------------------- */
 
@@ -176,8 +176,8 @@ export function DashboardPage() {
   const countOldCopies = useCallback((folder: string) => {
     if (!folder) return
     invoke<OldCopy[]>("list_old_copies", { folder })
-      .then((found) => setOldCopies(found.length))
-      .catch(() => setOldCopies(0))
+      .then(setOldCopies)
+      .catch(() => setOldCopies([]))
   }, [])
 
   useEffect(() => {
@@ -368,6 +368,11 @@ export function DashboardPage() {
 
   const history = selectedSave ? historyByWorld[selectedSave.name] ?? null : null
   const details = selectedSave ? detailsByWorld[selectedSave.name] : undefined
+  // Space first, because until now these were only ever described as clutter in
+  // the world list -- and the ones that are not in the world list, which is most
+  // of them, were never mentioned at all.
+  const copiesSize = oldCopies.reduce((sum, copy) => sum + copy.bytes, 0)
+  const copiesInGame = oldCopies.filter((copy) => copy.in_saves_folder).length
   const status = selectedSave ? statuses[selectedSave.name] ?? null : null
   const world = selectedSave ? worldStates[selectedSave.name] ?? null : null
   const hasCloud = Boolean(status?.remote_url || selectedSave?.remote_repo_path)
@@ -573,11 +578,20 @@ export function DashboardPage() {
         </div>
       </header>
 
-      {oldCopies > 0 && (
+      {oldCopies.length > 0 && (
         <div className="flex shrink-0 items-center gap-3 border-b bg-amber-500/10 px-4 py-2 text-sm">
           <AlertTriangle className="size-4 shrink-0 text-amber-600 dark:text-amber-400" />
           <span className="min-w-0 flex-1 truncate">
-            {t("oldCopies.banner", { count: oldCopies })}
+            {copiesInGame > 0
+              ? t("oldCopies.bannerInGame", {
+                  count: oldCopies.length,
+                  size: fileSize(copiesSize),
+                  inGame: copiesInGame,
+                })
+              : t("oldCopies.banner", {
+                  count: oldCopies.length,
+                  size: fileSize(copiesSize),
+                })}
           </span>
           <Button size="sm" variant="outline" onClick={() => setCopiesOpen(true)}>
             {t("oldCopies.review")}

@@ -338,11 +338,16 @@ const en = {
 
   /* ── The guide ──────────────────────────────────────────────────────── */
 
-  "oldCopies.banner": "{count} old world copies are showing up in Minecraft",
+  "oldCopies.banner": "{count} old world copies are taking up {size}",
+  "oldCopies.bannerInGame":
+    "{count} old world copies are taking up {size}, and {inGame} of them are showing up in Minecraft",
+  "oldCopies.inGame": "showing in Minecraft",
   "oldCopies.review": "Sort this out",
   "oldCopies.title": "Copies left among your worlds",
   "oldCopies.body":
-    "Every time you went back to an earlier backup, MineCommit kept the world you had at that moment. They were left in your saves folder, which is why Minecraft lists them next to your real worlds. Moving them out gets them out of the game and keeps every one of them.",
+    "Every time you went back to an earlier backup, MineCommit kept the world you had at that moment. Some are still in your saves folder, which is why Minecraft lists them next to your real worlds. Moving them out gets them out of the game and keeps every one of them.",
+  "oldCopies.bodySpace":
+    "Every time you went back to an earlier backup, MineCommit kept the world you had at that moment. None of these are in the way — Minecraft cannot see them — but they are taking up room. Each one is a world as it stood before a restore, so delete them only if you are sure you will not want to go back.",
   "oldCopies.scanning": "Adding up what they take…",
   "oldCopies.none": "Nothing left to tidy up.",
   "oldCopies.from": "from {world}",
@@ -701,11 +706,16 @@ const zhCN: Record<TranslationKey, string> = {
   "settings.identityHelp":
     "会写在每个备份旁边，方便你分辨是哪台电脑做的。不会展示给其他人。",
 
-  "oldCopies.banner": "有 {count} 个旧存档副本出现在 Minecraft 里",
+  "oldCopies.banner": "{count} 个旧存档副本占用了 {size}",
+  "oldCopies.bannerInGame":
+    "{count} 个旧存档副本占用了 {size}，其中 {inGame} 个出现在 Minecraft 里",
+  "oldCopies.inGame": "出现在 Minecraft 里",
   "oldCopies.review": "去处理",
   "oldCopies.title": "混在存档里的旧副本",
   "oldCopies.body":
-    "每次你回到更早的备份时，MineCommit 都会保留当时的那个世界。它们留在了存档文件夹里，所以 Minecraft 会把它们和你真正的存档并排列出来。把它们移出去就不会再出现在游戏里，而且一个都不会少。",
+    "每次你回到更早的备份时，MineCommit 都会保留当时的那个世界。其中一些还留在存档文件夹里，所以 Minecraft 会把它们和你真正的存档并排列出来。把它们移出去就不会再出现在游戏里，而且一个都不会少。",
+  "oldCopies.bodySpace":
+    "每次你回到更早的备份时，MineCommit 都会保留当时的那个世界。它们并不碍事 —— Minecraft 看不到它们 —— 但确实占地方。每一个都是某次还原之前的世界，所以只有在确定不会再回去时才删除。",
   "oldCopies.scanning": "正在统计它们占用的空间…",
   "oldCopies.none": "没有需要整理的了。",
   "oldCopies.from": "来自 {world}",

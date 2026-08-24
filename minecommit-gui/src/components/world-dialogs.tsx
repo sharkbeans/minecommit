@@ -625,6 +625,13 @@ export function OldCopiesDialog({
     () => (copies ?? []).reduce((sum, copy) => sum + copy.bytes, 0),
     [copies]
   )
+  // Moving only means anything for the copies Minecraft can still see. The rest
+  // are already out of the way and are only taking up room, so offering to move
+  // them again would be a button that does nothing.
+  const inSaves = useMemo(
+    () => (copies ?? []).filter((copy) => copy.in_saves_folder),
+    [copies]
+  )
 
   const run = useCallback(
     async (what: "move" | "delete") => {
@@ -635,7 +642,7 @@ export function OldCopiesDialog({
         if (what === "move") {
           const where = await invoke<string>("tidy_old_copies", {
             folder: savesFolder,
-            paths,
+            paths: inSaves.map((copy) => copy.path),
           })
           setDone(t("oldCopies.moved", { where }))
         } else {
@@ -651,7 +658,7 @@ export function OldCopiesDialog({
         setConfirming(false)
       }
     },
-    [busy, onCleared, paths, savesFolder, t]
+    [busy, inSaves, onCleared, paths, savesFolder, t]
   )
 
   return (
@@ -659,7 +666,11 @@ export function OldCopiesDialog({
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{t("oldCopies.title")}</DialogTitle>
-          <DialogDescription>{t("oldCopies.body")}</DialogDescription>
+          {/* Whether these are a problem or merely a cost depends on where
+              they are, and until now the wording assumed the first. */}
+          <DialogDescription>
+            {t(inSaves.length > 0 ? "oldCopies.body" : "oldCopies.bodySpace")}
+          </DialogDescription>
         </DialogHeader>
 
         {copies === null ? (
@@ -684,6 +695,7 @@ export function OldCopiesDialog({
                       {copy.taken
                         ? t("oldCopies.taken", { when: relativeTime(copy.taken, locale) })
                         : ""}
+                      {copy.in_saves_folder ? ` · ${t("oldCopies.inGame")}` : ""}
                     </span>
                   </span>
                   <span className="shrink-0 font-mono text-xs text-muted-foreground">
@@ -722,7 +734,7 @@ export function OldCopiesDialog({
           )}
           <div className="flex gap-2">
             <DialogClose render={<Button variant="outline">{t("common.close")}</Button>} />
-            {copies !== null && copies.length > 0 && (
+            {inSaves.length > 0 && (
               <Button disabled={busy !== null} onClick={() => void run("move")}>
                 {busy === "move" && <Loader2 data-icon="inline-start" className="animate-spin" />}
                 {busy === "move" ? t("oldCopies.moving") : t("oldCopies.moveAction")}
