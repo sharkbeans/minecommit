@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.12.1 (2026-08-24)
+
+Fixes
+
+- A restore of a 3.1 GB world said "30 / 81 GB". Both numbers were real and
+  neither meant anything: a world is stored one chunk at a time and
+  uncompressed, so Git can tell which chunks changed, and 505,862 stored pieces
+  come to 81 GB even though the same world is 3.1 GB in the saves folder and
+  1.9 GB as a backup. A restore now counts pieces, and says why there are so
+  many of them.
+
+  Backing up still shows a size, because there it measures the world folder as
+  it sits on disk. So does uploading or downloading, which measures what
+  actually crosses the network.
+
+- The elapsed time counted the hours the computer spent asleep. A laptop
+  suspended part-way through a restore came back reporting 167 minutes of work
+  for about ten minutes of it, and predicted 4.9 hours still to go. The clock
+  now stops when the machine does. It also no longer depends on the window
+  being on screen, which it was, and which is exactly where a long backup is
+  left to run.
+
+- An upload or download left its progress bar running after it finished, and
+  handed it to whatever ran next.
+
+- Times over an hour are shown as hours. "167m 43s" was arithmetic homework.
+
 ## 0.12.0 (2026-08-24)
 
 Changes
