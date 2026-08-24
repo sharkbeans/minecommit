@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.12.0 (2026-08-24)
+
+Changes
+
+- Each world now shows what Minecraft itself knows about it: the version it was
+  last opened in, the game mode, the difficulty, whether it is hardcore, the
+  in-game day, its size on disk, the spawn point and the seed. The list of
+  worlds to add shows the version too, which is what tells two similarly named
+  folders apart.
+
+  Reading that needed two layouts. The 26.x releases moved difficulty, hardcore
+  and the spawn point into sections of their own, turned the difficulty from a
+  number into a name, and took the seed out of level.dat altogether -- so
+  against a current world the old field names found nothing at all, and reported
+  a hardcore world as not hardcore.
+
+- The progress bar counts bytes rather than files, and says "351 / 1,024 MB". A
+  world is a few hundred large region files next to a few thousand tiny ones, so
+  a bar counting files sprinted through the small ones and then sat still.
+
+- Uploads and downloads have a bar at all for the first time. Git knows exactly
+  how a transfer is going but only draws it to a terminal; it is now asked to
+  report anyway and its own figures are shown. The card names what it is doing
+  -- reading, rebuilding, downloading, uploading -- and estimates the time left
+  from the current step alone rather than from everything before it.
+
+- A world keeps the name it was first backed up under, on every computer that
+  gets it. The two places that let you type a different one are gone: renaming a
+  world on the way down left the same world existing twice under two names, with
+  no backup history connecting them and nothing able to tell they were the same.
+
+- There is a Minecraft block beside each world. It is drawn in the app rather
+  than taken from anywhere -- Minecraft's own textures are Mojang's.
+
+Fixes
+
+- A world containing a file whose name is not plain ASCII -- a data pack called
+  "café", a folder with a space or a quotation mark in it -- restored that file
+  under a mangled name, and the real one did not come back at all. Git escapes
+  such names when listing what a backup holds, and the escaped form was being
+  read back as though it were the name.
+
+- Very large world seeds were shown wrong. A seed uses the whole 64-bit range
+  and does not survive the only kind of number the interface can carry; the seed
+  -352129843062846360 was displayed as -352129843062846400, which generates an
+  entirely different world.
+
 ## 0.11.2 (2026-08-23)
 
 Changes
