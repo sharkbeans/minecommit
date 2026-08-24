@@ -1099,10 +1099,16 @@ async fn clone_save_from_cloud(
             save: None,
         });
     }
+    // A world keeps the name it was backed up under, on every computer that has
+    // it, so there is no second name to fall back on when one is already taken.
+    // Both of these mean the same thing to the player: this world is already
+    // here. Neither may overwrite what is there to make room.
     if state.saves.lock().unwrap().iter().any(|s| s.name == name) {
         return Ok(CloneFromCloudResult {
             success: false,
-            error: Some(format!("A save named \"{name}\" already exists")),
+            error: Some(format!(
+                "\"{name}\" is already one of the worlds MineCommit is looking after on this PC."
+            )),
             save: None,
         });
     }
@@ -1112,8 +1118,8 @@ async fn clone_save_from_cloud(
         return Ok(CloneFromCloudResult {
             success: false,
             error: Some(format!(
-                "{save_path} already exists. Choose a folder that does not exist yet, so an \
-                 existing world cannot be overwritten."
+                "There is already a world at {save_path}. Move or rename that folder if you \
+                 want to download this one beside it -- nothing there will be overwritten."
             )),
             save: None,
         });

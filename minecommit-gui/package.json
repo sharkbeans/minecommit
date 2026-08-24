@@ -12,7 +12,8 @@
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit",
     "check:tauri-args": "bun scripts/check-tauri-args.mjs",
-    "check": "bun run typecheck && bun run check:tauri-args"
+    "check": "bun run typecheck && bun run check:tauri-args && bun run check:world-naming",
+    "check:world-naming": "bun scripts/check-world-naming.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",

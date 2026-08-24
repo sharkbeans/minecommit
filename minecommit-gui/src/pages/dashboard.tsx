@@ -677,16 +677,6 @@ export function DashboardPage() {
                     <GrassBlock className="size-5" />
                     <span className="truncate">{selectedSave.name}</span>
                   </h1>
-                  {/* Renaming a world in Minecraft leaves its folder alone, so
-                      the name in the game and the name here drift apart. The
-                      folder is what MineCommit tracks, but the in-game name is
-                      the one the player recognises. */}
-                  {details?.level?.level_name &&
-                    details.level.level_name !== selectedSave.name && (
-                      <p className="mt-1 truncate text-xs text-muted-foreground">
-                        {t("world.inGameName", { name: details.level.level_name })}
-                      </p>
-                    )}
                   {status === null && !statusError ? (
                     // "Never backed up" is the wrong thing to say to someone
                     // whose world is backed up; it is only true once the

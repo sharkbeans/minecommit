@@ -166,7 +166,6 @@ const en = {
   "world.copied": "Copied",
   "world.spawn": "Spawn",
   "world.dataPacks": "Data packs",
-  "world.inGameName": "In Minecraft this world is called “{name}”",
   "world.mode.survival": "Survival",
   "world.mode.creative": "Creative",
   "world.mode.adventure": "Adventure",
@@ -214,8 +213,10 @@ const en = {
   "add.cloudNoWorlds":
     "Nothing has been backed up to this space yet. Back a world up from your other computer first.",
   "add.cloudWorld": "World",
-  "add.cloudName": "Save it as",
-  "add.cloudNameHelp": "It will appear in Minecraft under this name.",
+  "add.cloudNameFixed":
+    "It will appear in Minecraft as “{name}” — the name it was backed up under, so every computer that has this world calls it the same thing.",
+  "add.cloudAlreadyHere":
+    "You already have this world on this PC. There is nothing to download.",
   "add.download": "Download",
   "add.downloading": "Downloading…",
   "add.downloadingHelp": "A large world can take several minutes.",
@@ -275,7 +276,7 @@ const en = {
     "One space can hold several worlds. Each keeps its own name and they never mix.",
   "setup.pick.repo": "Backup space",
   "setup.pick.repoHelp": "Only spaces you ticked on GitHub appear here.",
-  "setup.pick.name": "Name for this world",
+  "setup.pick.name": "Backed up as",
   "setup.pick.nameHelp":
     "Any computer that downloads this world will see it under this name.",
   "setup.pick.action": "Back up here from now on",
@@ -546,7 +547,6 @@ const zhCN: Record<TranslationKey, string> = {
   "world.copied": "已复制",
   "world.spawn": "出生点",
   "world.dataPacks": "数据包",
-  "world.inGameName": "在 Minecraft 里这个世界叫“{name}”",
   "world.mode.survival": "生存",
   "world.mode.creative": "创造",
   "world.mode.adventure": "冒险",
@@ -588,8 +588,9 @@ const zhCN: Record<TranslationKey, string> = {
   "add.cloudNoWorlds":
     "这个空间里还没有备份过任何存档。请先在另一台电脑上备份一次。",
   "add.cloudWorld": "存档",
-  "add.cloudName": "保存为",
-  "add.cloudNameHelp": "它会以这个名字出现在 Minecraft 里。",
+  "add.cloudNameFixed":
+    "它会以“{name}”出现在 Minecraft 里 —— 这是它备份时的名字，所以每台有这个存档的电脑叫它的名字都一样。",
+  "add.cloudAlreadyHere": "这台电脑上已经有这个存档了，不需要再下载。",
   "add.download": "下载",
   "add.downloading": "下载中…",
   "add.downloadingHelp": "大的存档可能需要几分钟。",
@@ -642,7 +643,7 @@ const zhCN: Record<TranslationKey, string> = {
   "setup.pick.body": "一个空间可以放好几个存档，各用各的名字，互不影响。",
   "setup.pick.repo": "备份空间",
   "setup.pick.repoHelp": "这里只会显示你在 GitHub 上勾选过的空间。",
-  "setup.pick.name": "这个存档的名字",
+  "setup.pick.name": "备份名",
   "setup.pick.nameHelp": "任何下载这个存档的电脑都会看到这个名字。",
   "setup.pick.action": "以后就备份到这里",
   "setup.pick.working": "连接中…",

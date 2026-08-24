@@ -22,7 +22,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Field, FieldGroup } from "@/components/ui/field"
-import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
   Select,
@@ -93,7 +92,9 @@ export function CloudSetupDialog({
   const [manualStage, setManualStage] = useState<Stage | null>(null)
   const [openedCreatePage, setOpenedCreatePage] = useState(false)
   const [pickedRepo, setPickedRepo] = useState("")
-  const [branch, setBranch] = useState(() => asRepositoryName(world))
+  // Follows from the world and nothing can change it, so it is derived rather
+  // than held: there is no state here for a stale name to survive in.
+  const branch = asRepositoryName(world)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
   const [justFound, setJustFound] = useState(false)
@@ -217,12 +218,10 @@ export function CloudSetupDialog({
       case "pick":
         return (
           <PickStep
-            world={world}
             repos={repos}
             chosen={chosen}
             onChoose={setPickedRepo}
             branch={branch}
-            onBranch={setBranch}
             found={justFound}
             onAddAnother={() => {
               setManualStage("create")
@@ -240,7 +239,6 @@ export function CloudSetupDialog({
     polls,
     repos,
     stage,
-    world,
   ])
 
   return (
@@ -443,21 +441,17 @@ function GrantStep({ watching, onCheck }: { watching: boolean; onCheck: () => vo
 /* ── Step: choose where this world goes ──────────────────────────────────── */
 
 function PickStep({
-  world,
   repos,
   chosen,
   onChoose,
   branch,
-  onBranch,
   found,
   onAddAnother,
 }: {
-  world: string
   repos: GrantedRepository[] | null
   chosen: string
   onChoose: (url: string) => void
   branch: string
-  onBranch: (name: string) => void
   found: boolean
   onAddAnother: () => void
 }) {
@@ -497,14 +491,13 @@ function PickStep({
         </Select>
         <p className="text-xs text-muted-foreground">{t("setup.pick.repoHelp")}</p>
       </Field>
+      {/* Shown, not asked. The name a world is backed up under is the name
+          every other computer will know it by, so it is settled once here and
+          never typed again: a world renamed on one machine is the same world
+          under two names, and nothing afterwards can tell they are the same. */}
       <Field>
-        <Label htmlFor="setup-name">{t("setup.pick.name")}</Label>
-        <Input
-          id="setup-name"
-          value={branch}
-          placeholder={asRepositoryName(world)}
-          onChange={(event) => onBranch(event.target.value)}
-        />
+        <Label>{t("setup.pick.name")}</Label>
+        <p className="text-sm">{branch}</p>
         <p className="text-xs text-muted-foreground">{t("setup.pick.nameHelp")}</p>
       </Field>
       <button

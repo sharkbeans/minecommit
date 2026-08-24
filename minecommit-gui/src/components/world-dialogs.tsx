@@ -323,7 +323,6 @@ function AddFromCloud({
   const [lookedUp, setLookedUp] = useState("")
   const [worlds, setWorlds] = useState<{ source: string; names: string[] } | null>(null)
   const [pickedWorld, setPickedWorld] = useState("")
-  const [editedName, setEditedName] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
 
@@ -351,7 +350,10 @@ function AddFromCloud({
   const names = worlds?.source === source ? worlds.names : null
   const loadingWorlds = source !== "" && names === null
   const world = pickedWorld && names?.includes(pickedWorld) ? pickedWorld : (names?.[0] ?? "")
-  const name = editedName ?? world
+  // The name is the one the world was backed up under, and cannot be changed
+  // here. A world renamed on the way down is the same world under two names on
+  // two computers, and nothing afterwards can tell they are the same.
+  const name = world
 
   useEffect(() => {
     if (!source) return
@@ -492,7 +494,6 @@ function AddFromCloud({
               onValueChange={(value) => {
                 setPickedRepo(value ?? "")
                 setPickedWorld("")
-                setEditedName(null)
               }}
             >
               <SelectTrigger id="cloud-repo" className="w-full">
@@ -526,10 +527,7 @@ function AddFromCloud({
               <Label htmlFor="cloud-world">{t("add.cloudWorld")}</Label>
               <Select
                 value={world}
-                onValueChange={(value) => {
-                  setPickedWorld(value ?? "")
-                  setEditedName(null)
-                }}
+                onValueChange={(value) => setPickedWorld(value ?? "")}
               >
                 <SelectTrigger id="cloud-world" className="w-full">
                   <SelectValue placeholder={t("add.cloudWorld")} />
@@ -542,15 +540,9 @@ function AddFromCloud({
                   ))}
                 </SelectContent>
               </Select>
-            </Field>
-            <Field>
-              <Label htmlFor="cloud-name">{t("add.cloudName")}</Label>
-              <Input
-                id="cloud-name"
-                value={name}
-                onChange={(event) => setEditedName(event.target.value)}
-              />
-              <p className="text-xs text-muted-foreground">{t("add.cloudNameHelp")}</p>
+              <p className="text-xs text-muted-foreground">
+                {t("add.cloudNameFixed", { name })}
+              </p>
             </Field>
           </>
         )}
