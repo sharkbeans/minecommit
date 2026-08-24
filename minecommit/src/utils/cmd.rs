@@ -187,6 +187,12 @@ pub fn exec_watching_transfer(mut cmd: Command) -> Result<CommandOutput> {
 
 /// Feed one redrawn progress line into the counters.
 fn report_transfer(line: &str) {
+    // Not every fetch is one the player is waiting on: checking whether the
+    // cloud has anything new is a fetch as well, and so is the one a push does
+    // before it uploads. Only a job somebody started draws a bar.
+    if !progress::job_running() {
+        return;
+    }
     let Some(transfer) = parse_transfer(line) else {
         return;
     };
@@ -650,6 +656,40 @@ mod transfer_tests {
             .expect("a reading");
         assert_eq!(reading.bytes, 1024);
         assert_eq!(parse_size("3.21 MiB/s"), None, "a rate has no place in a total");
+    }
+
+    /// Not every fetch is one somebody is waiting on. Checking whether the
+    /// cloud has anything new is a fetch, and so is the one a push runs before
+    /// it uploads, and neither should put a bar on screen.
+    ///
+    /// The gate cannot be seen from outside: whatever it lets through is ended
+    /// again when the command finishes, so a caller watching the counters
+    /// afterwards sees the same stillness either way. It can only be caught
+    /// mid-transfer, which is a race, so the source is checked instead -- the
+    /// same way this file already guards how Git is spawned.
+    #[test]
+    fn a_transfer_nobody_asked_about_moves_nothing() {
+        let source = include_str!("cmd.rs");
+        let start = source
+            .find("fn report_transfer(")
+            .expect("report_transfer must exist");
+        let body = &source[start..];
+        let end = body.find("\n}\n").expect("report_transfer must end");
+        let body = &body[..end];
+
+        let gate = body
+            .find("job_running()")
+            .expect("report_transfer must ask whether anyone is watching");
+        for touches in ["progress::begin", "progress::set"] {
+            let at = body
+                .find(touches)
+                .unwrap_or_else(|| panic!("report_transfer no longer calls {touches}"));
+            assert!(
+                gate < at,
+                "{touches} runs before the check for whether anyone asked to watch, \
+                 so an ordinary background fetch would draw a bar:\n{body}"
+            );
+        }
     }
 
     #[test]

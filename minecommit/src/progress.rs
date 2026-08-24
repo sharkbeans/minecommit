@@ -143,8 +143,31 @@ impl Report {
 ///
 /// Every phase after this one restarts the phase clock; this one is what the
 /// player sees as "so far", and survives the gaps between phases.
+///
+/// It also marks that somebody is watching. A backup reads files, and reading
+/// files is something the library does whether or not a bar is on screen, so
+/// the file counters have always been gated on a run having been started. A
+/// transfer needs the same gate for the same reason: fetching is not only done
+/// on the player's behalf -- checking whether the cloud has anything new is a
+/// fetch too -- and a bar has no business appearing for work nobody asked to
+/// watch.
 pub fn start_job() {
     mark(&JOB_STARTED, Some(Instant::now()));
+}
+
+/// Finish the job started by [`start_job`], so nothing counts until the next
+/// one begins.
+pub fn end_job() {
+    mark(&JOB_STARTED, None);
+    end();
+}
+
+/// Whether anybody asked to be told how the current work is going.
+pub fn job_running() -> bool {
+    JOB_STARTED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
 }
 
 /// Start counting a run of `files` files totalling `bytes`. Either total may be
@@ -328,6 +351,11 @@ mod tests {
             report().job_seconds < 2,
             "the job clock keeps running between phases"
         );
+        assert!(job_running(), "and the job is still the thing being timed");
+
+        end_job();
+        assert!(!job_running(), "until it is finished");
+        assert_eq!(report().job_seconds, 0);
     }
 
     /// Git counts a transfer up from zero and revises its own object total as

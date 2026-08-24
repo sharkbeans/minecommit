@@ -1019,6 +1019,9 @@ mod tests {
 
     #[test]
     fn status_distinguishes_fast_forward_and_divergence() {
+        let _progress = crate::progress::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let remote = init_bare();
         let device_a = init_bare();
         let device_b = init_bare();
@@ -1052,14 +1055,20 @@ mod tests {
     /// An upload and a download draw a bar from Git's own transfer counters.
     /// Whoever starts that bar has to stop it: a phase left standing keeps a
     /// finished transfer on screen as a live one, and hands whatever runs next
-    /// a bar it never asked for -- including, before this, every unrelated test
-    /// in this file that happened to run at the same moment.
+    /// a bar it never asked for.
+    ///
+    /// Only the transfer phases are asserted on, not "no phase at all". This
+    /// test can only speak for the transfers it started, and the counters are
+    /// process-wide -- an earlier version asserted the counters were entirely
+    /// still and failed on CI, where a slower machine let another test's fetch
+    /// overlap this line.
     #[test]
     fn a_finished_transfer_leaves_no_bar_behind() {
-        use crate::progress;
+        use crate::progress::{self, Phase};
 
         let _guard = progress::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        progress::end();
+        progress::end_job();
+        progress::start_job();
 
         let remote = init_bare();
         let device = init_bare();
@@ -1067,21 +1076,23 @@ mod tests {
         set_branch(device.path(), &initial);
         let sync = configured(device.path(), remote.path());
 
+        let transferring =
+            || matches!(progress::report().phase, Phase::Uploading | Phase::Downloading);
+
         sync.push().expect("push");
-        assert!(
-            !progress::report().running(),
-            "an upload that has finished must not still be counting"
-        );
+        assert!(!transferring(), "an upload that has finished must not still be counting");
 
         sync.fetch().expect("fetch");
-        assert!(
-            !progress::report().running(),
-            "and neither must a download"
-        );
+        assert!(!transferring(), "and neither must a download");
+
+        progress::end_job();
     }
 
     #[test]
     fn remote_ahead_fast_forwards_without_merge() {
+        let _progress = crate::progress::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let remote = init_bare();
         let device_a = init_bare();
         let device_b = init_bare();
@@ -1110,6 +1121,9 @@ mod tests {
 
     #[test]
     fn fetch_requires_a_configured_reachable_remote() {
+        let _progress = crate::progress::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let repo = init_bare();
         let sync = RemoteSync::new(repo.path(), DEFAULT_BRANCH).unwrap();
         assert_eq!(sync.status().unwrap().state, SyncState::NotConfigured);
@@ -1124,6 +1138,9 @@ mod tests {
     /// refs, so a stale one lets a deleted repository keep reporting state.
     #[test]
     fn repointing_the_remote_forgets_the_previous_repository() {
+        let _progress = crate::progress::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let old_cloud = init_bare();
         let new_cloud = init_bare();
         let device = init_bare();
@@ -1154,6 +1171,9 @@ mod tests {
     /// rather than letting an earlier value stand in for cloud state.
     #[test]
     fn fetching_a_missing_branch_clears_its_tracking_ref() {
+        let _progress = crate::progress::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cloud = init_bare();
         let device = init_bare();
 
@@ -1175,6 +1195,9 @@ mod tests {
 
     #[test]
     fn lists_branches_that_exist_on_the_remote() {
+        let _progress = crate::progress::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cloud = init_bare();
         let device = init_bare();
         let backup = commit(device.path(), None, "backup");
@@ -1284,6 +1307,47 @@ mod tests {
         assert!(
             !progress::report().running(),
             "a finished backup must leave no bar behind"
+        );
+    }
+
+    /// Every test that fetches or pushes has to hold the progress lock.
+    ///
+    /// The progress counters are process-wide, and a transfer moves them as
+    /// soon as anything in the process has asked to be told about progress --
+    /// which one test asking for is enough to make true for all of them. So a
+    /// fetch in one test and an assertion in another, running at the same
+    /// moment, read each other's numbers. That is not hypothetical: it is how
+    /// this was found, on a CI machine slow enough for the two to overlap.
+    #[test]
+    fn a_test_that_transfers_holds_the_progress_lock() {
+        const TRANSFERS: [&str; 4] = [".fetch()", ".push()", ".fast_forward()", "sync_before_playing("];
+
+        let source = include_str!("sync.rs");
+        let tests = &source[source.find("mod tests {").expect("a test module")..];
+
+        // Test bodies run from one `fn name() {` to the next; the last one ends
+        // with the module.
+        let mut starts: Vec<(usize, &str)> = Vec::new();
+        for (at, _) in tests.match_indices("\n    fn ") {
+            let rest = &tests[at + 8..];
+            let name = &rest[..rest.find('(').unwrap_or(0)];
+            starts.push((at, name));
+        }
+
+        let mut offenders = Vec::new();
+        for (index, (at, name)) in starts.iter().enumerate() {
+            let end = starts.get(index + 1).map_or(tests.len(), |(next, _)| *next);
+            let body = &tests[*at..end];
+            if TRANSFERS.iter().any(|call| body.contains(call)) && !body.contains("TEST_LOCK") {
+                offenders.push(*name);
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "these fetch or push without holding crate::progress::TEST_LOCK, so they \
+             move the progress counters other tests are asserting on:\n  {}",
+            offenders.join("\n  ")
         );
     }
 

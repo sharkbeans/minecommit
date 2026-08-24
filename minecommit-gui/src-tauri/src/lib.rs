@@ -424,6 +424,9 @@ async fn perform_commit(
     running.store(false, Ordering::Relaxed);
     let _ = log_task.await;
 
+    // Nothing is being watched any more. Checking a world's cloud state fetches
+    // too, and without this that fetch would go on moving a bar nobody can see.
+    minecommit::progress::end_job();
     let _ = app.emit("commit-finished", ());
 
     result.unwrap_or_else(|e| PerformCommitResult {
@@ -529,6 +532,9 @@ async fn perform_restore(
     running.store(false, Ordering::Relaxed);
     let _ = log_task.await;
 
+    // Nothing is being watched any more. Checking a world's cloud state fetches
+    // too, and without this that fetch would go on moving a bar nobody can see.
+    minecommit::progress::end_job();
     let _ = app.emit("commit-finished", ());
 
     result.unwrap_or_else(|e| PerformRestoreResult {
@@ -593,6 +599,9 @@ async fn perform_push(
 
     running.store(false, Ordering::Relaxed);
     let _ = log_task.await;
+    // Nothing is being watched any more. Checking a world's cloud state fetches
+    // too, and without this that fetch would go on moving a bar nobody can see.
+    minecommit::progress::end_job();
     let _ = app.emit("commit-finished", ());
 
     result.unwrap_or_else(|e| PerformRestoreResult {
@@ -661,6 +670,9 @@ async fn perform_pull(
 
     running.store(false, Ordering::Relaxed);
     let _ = log_task.await;
+    // Nothing is being watched any more. Checking a world's cloud state fetches
+    // too, and without this that fetch would go on moving a bar nobody can see.
+    minecommit::progress::end_job();
     let _ = app.emit("commit-finished", ());
 
     result.unwrap_or_else(|e| PerformRestoreResult {
@@ -1181,6 +1193,9 @@ async fn clone_save_from_cloud(
 
     running.store(false, Ordering::Relaxed);
     let _ = log_task.await;
+    // Nothing is being watched any more. Checking a world's cloud state fetches
+    // too, and without this that fetch would go on moving a bar nobody can see.
+    minecommit::progress::end_job();
     let _ = app.emit("commit-finished", ());
 
     let outcome = match outcome {
@@ -1967,6 +1982,9 @@ async fn backup_and_upload(
 
     running.store(false, Ordering::Relaxed);
     let _ = log_task.await;
+    // Nothing is being watched any more. Checking a world's cloud state fetches
+    // too, and without this that fetch would go on moving a bar nobody can see.
+    minecommit::progress::end_job();
     let _ = app.emit("commit-finished", ());
 
     result.unwrap_or_else(|e| BackupResult {
