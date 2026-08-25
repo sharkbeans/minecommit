@@ -77,6 +77,27 @@ export interface FoundWorld {
 }
 
 /** What level.dat says about a world. Every field may be missing. */
+/**
+ * A saves folder MineCommit found somewhere on this computer.
+ *
+ * A player running a modpack has their worlds inside a launcher's instance
+ * rather than in .minecraft, and there is no way for them to know that from
+ * inside MineCommit -- the folder simply comes back empty.
+ */
+export interface FoundSavesFolder {
+  path: string
+  /** "Minecraft", "Prism Launcher", "CurseForge"… */
+  launcher: string
+  /** The instance the worlds are in, for launchers that keep one per modpack. */
+  instance: string | null
+  worlds: number
+}
+
+/** "Prism Launcher · 1.21.4 fabric", or just the launcher for a plain install. */
+export function savesFolderLabel(folder: FoundSavesFolder): string {
+  return folder.instance ? `${folder.launcher} · ${folder.instance}` : folder.launcher
+}
+
 export interface LevelInfo {
   level_name: string | null
   version_name: string | null
@@ -343,6 +364,17 @@ export function remainingLabel(
   return t("state.hoursLeft", { hours: Math.round(seconds / 360) / 10 })
 }
 
+/**
+ * A running duration, in the coarsest unit that is still precise enough to be
+ * seen moving. "167m 43s" is a number the reader has to divide themselves, so
+ * past an hour this says hours.
+ */
+export function clock(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`
+  return `${Math.floor(seconds / 3600)}h ${String(Math.floor((seconds % 3600) / 60)).padStart(2, "0")}m`
+}
+
 export interface BackupResult {
   backed_up: boolean
   uploaded: boolean
@@ -396,12 +428,13 @@ export function situationOf(
 }
 
 /**
- * Whether the world folder has changed since the newest backup was taken.
+ * Whether the world has been played since the newest backup was taken.
  *
- * level.dat is rewritten when Minecraft saves, so its timestamp is a cheap
- * stand-in for "there is something new to record". A false positive costs one
- * duplicate history entry; a false negative would tell the player they are
- * backed up when they are not, so ties count as changed.
+ * `last_played` is the time Minecraft itself stamped into level.dat, not the
+ * time the file was written -- see `last_played_at` in the Rust side for why
+ * that distinction is the whole of this. A false positive costs one duplicate
+ * history entry; a false negative would tell the player they are backed up
+ * when they are not, so ties count as played.
  */
 export function playedSinceBackup(
   status: CloudStatus | null,

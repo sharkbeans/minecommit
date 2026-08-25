@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
 use log::{LevelFilter, Log, Metadata, Record};
 use minecommit::{
     level::{read_world, LevelInfo},
@@ -1379,6 +1379,297 @@ fn default_saves_folder() -> String {
     }
 }
 
+/// A saves folder found somewhere on this computer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FoundSavesFolder {
+    pub path: String,
+    /// The launcher this folder belongs to: "Minecraft", "Prism Launcher".
+    pub launcher: String,
+    /// The instance or profile the worlds sit in, for the launchers that keep
+    /// one Minecraft per modpack. `None` for a plain install with one folder.
+    pub instance: Option<String>,
+    /// How many worlds are in it. A folder with none is never offered.
+    pub worlds: u32,
+}
+
+/// How a launcher arranges its worlds underneath a root directory.
+enum Layout {
+    /// The root is the saves folder itself.
+    Direct,
+    /// The root holds one directory per instance, each with a Minecraft of its
+    /// own inside it.
+    Instances,
+}
+
+/// Where the worlds sit inside one instance directory.
+///
+/// Every launcher that keeps instances puts a whole Minecraft install in each
+/// one, but they disagree on what that install is called: MultiMC and the
+/// launchers forked from it use `.minecraft` (`minecraft` on macOS), while
+/// CurseForge and Modrinth make the instance folder the install. Trying all
+/// three costs three `is_dir` calls and covers every launcher there is.
+const INSTANCE_SAVES: [&str; 3] = ["saves", ".minecraft/saves", "minecraft/saves"];
+
+/// The data directory launchers put themselves in on this platform.
+#[cfg(windows)]
+fn app_data_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(PathBuf::from)
+}
+
+/// The data directory launchers put themselves in on this platform.
+#[cfg(target_os = "macos")]
+fn app_data_dir() -> Option<PathBuf> {
+    home_dir().map(|home| home.join("Library").join("Application Support"))
+}
+
+/// The data directory launchers put themselves in on this platform.
+///
+/// `XDG_DATA_HOME` is honoured where it is set to an absolute path, which is
+/// what the specification says to do with it; everywhere else this is the
+/// `~/.local/share` it defaults to.
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn app_data_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| home_dir().map(|home| home.join(".local").join("share")))
+}
+
+/// Every place a Minecraft launcher is known to keep worlds on this platform.
+///
+/// This is a list of guesses, not a search. Walking the disk for `level.dat`
+/// would find every world including the ones inside backups and downloads, and
+/// on a large drive it would take long enough that nobody would wait for it.
+/// The launchers people actually use all install to fixed, documented places,
+/// so naming them finds the same worlds in well under a second.
+fn saves_folder_candidates() -> Vec<(&'static str, Layout, PathBuf)> {
+    let mut roots: Vec<(&'static str, Layout, PathBuf)> = Vec::new();
+    let home = home_dir();
+    let data = app_data_dir();
+
+    // The plain install, from the one place that already knows where it is.
+    // Its .minecraft is not under the launchers' data directory on every
+    // platform -- on Linux it sits straight in the home directory -- so this
+    // must not be worked out a second time here.
+    let vanilla = PathBuf::from(default_saves_folder());
+    if vanilla.is_absolute() {
+        roots.push(("Minecraft", Layout::Direct, vanilla.clone()));
+        // An "installation" in the vanilla launcher can be given a game
+        // directory of its own, and the button that does it offers
+        // .minecraft/versions/<version>.
+        if let Some(dot_minecraft) = vanilla.parent() {
+            roots.push((
+                "Minecraft",
+                Layout::Instances,
+                dot_minecraft.join("versions"),
+            ));
+        }
+    }
+
+    if let Some(data) = &data {
+        roots.push((
+            "Prism Launcher",
+            Layout::Instances,
+            data.join("PrismLauncher").join("instances"),
+        ));
+        roots.push((
+            "PolyMC",
+            Layout::Instances,
+            data.join("PolyMC").join("instances"),
+        ));
+        roots.push((
+            "MultiMC",
+            Layout::Instances,
+            data.join("MultiMC").join("instances"),
+        ));
+        // Lowercase on Linux, where MultiMC ships its own directory name.
+        roots.push((
+            "MultiMC",
+            Layout::Instances,
+            data.join("multimc").join("instances"),
+        ));
+        roots.push((
+            "ATLauncher",
+            Layout::Instances,
+            data.join("ATLauncher").join("instances"),
+        ));
+        roots.push((
+            "GDLauncher",
+            Layout::Instances,
+            data.join("gdlauncher_next").join("instances"),
+        ));
+        roots.push((
+            "Technic",
+            Layout::Instances,
+            data.join(".technic").join("modpacks"),
+        ));
+        // The Modrinth app was called Theseus until 0.8, and an install that
+        // was upgraded rather than made fresh still keeps its worlds there.
+        roots.push((
+            "Modrinth",
+            Layout::Instances,
+            data.join("ModrinthApp").join("profiles"),
+        ));
+        roots.push((
+            "Modrinth",
+            Layout::Instances,
+            data.join("com.modrinth.theseus").join("profiles"),
+        ));
+    }
+
+    if let Some(home) = &home {
+        // CurseForge puts its modding folder in the home directory on Windows
+        // and in Documents on macOS, and lets it be moved to either anywhere.
+        roots.push((
+            "CurseForge",
+            Layout::Instances,
+            home.join("curseforge").join("minecraft").join("Instances"),
+        ));
+        roots.push((
+            "CurseForge",
+            Layout::Instances,
+            home.join("Documents")
+                .join("curseforge")
+                .join("minecraft")
+                .join("Instances"),
+        ));
+        roots.push((
+            "ATLauncher",
+            Layout::Instances,
+            home.join(".atlauncher").join("instances"),
+        ));
+        roots.push((
+            "FTB App",
+            Layout::Instances,
+            home.join(".ftba").join("instances"),
+        ));
+
+        // Flatpak gives each app its own home, so nothing above can see into
+        // one. These are the three that ship a Flatpak of Minecraft.
+        let flatpak = home.join(".var").join("app");
+        roots.push((
+            "Minecraft",
+            Layout::Direct,
+            flatpak
+                .join("com.mojang.Minecraft")
+                .join(".minecraft")
+                .join("saves"),
+        ));
+        roots.push((
+            "Prism Launcher",
+            Layout::Instances,
+            flatpak
+                .join("org.prismlauncher.PrismLauncher")
+                .join("data")
+                .join("PrismLauncher")
+                .join("instances"),
+        ));
+        roots.push((
+            "Modrinth",
+            Layout::Instances,
+            flatpak
+                .join("com.modrinth.ModrinthApp")
+                .join("data")
+                .join("ModrinthApp")
+                .join("profiles"),
+        ));
+    }
+
+    roots
+}
+
+/// How many worlds a folder holds, without reading any of them.
+///
+/// Only the shape is checked -- a directory with a `level.dat` in it -- because
+/// this runs over every instance of every launcher and opening each level.dat
+/// to be sure would turn a list into a wait. The copies a restore left behind
+/// are skipped for the same reason the picker skips them: they are the same
+/// world twice and counting them would overstate every folder they are in.
+fn count_worlds(saves: &Path) -> u32 {
+    let Ok(entries) = fs::read_dir(saves) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| !is_restore_snapshot(&entry.file_name().to_string_lossy()))
+        .filter(|entry| entry.path().join("level.dat").is_file())
+        .count() as u32
+}
+
+/// Every saves folder on this computer that has worlds in it.
+///
+/// The saves folder is the one thing MineCommit cannot work out for itself, and
+/// until now getting it wrong meant a player with a modpack had to know where
+/// their launcher hides its worlds and type the path in. Most of them do not,
+/// and a folder that comes back empty looks like MineCommit is broken rather
+/// than looking in the wrong place.
+///
+/// Never fails: a launcher that is not installed is simply a path that is not
+/// there, and a folder that cannot be read is one this player cannot back up
+/// from anyway.
+#[tauri::command]
+async fn discover_saves_folders() -> Vec<FoundSavesFolder> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut found: Vec<FoundSavesFolder> = Vec::new();
+        // The same folder is reachable by more than one of the guesses above --
+        // .minecraft/saves is both the vanilla folder and, on some setups, an
+        // instance of it. Canonical paths are what tells them apart.
+        let mut seen: Vec<PathBuf> = Vec::new();
+
+        let mut record = |launcher: &'static str, instance: Option<String>, saves: PathBuf| {
+            if !saves.is_dir() {
+                return;
+            }
+            let key = fs::canonicalize(&saves).unwrap_or_else(|_| saves.clone());
+            if seen.contains(&key) {
+                return;
+            }
+            seen.push(key);
+            let worlds = count_worlds(&saves);
+            if worlds == 0 {
+                return;
+            }
+            found.push(FoundSavesFolder {
+                path: saves.to_string_lossy().to_string(),
+                launcher: launcher.to_string(),
+                instance,
+                worlds,
+            });
+        };
+
+        for (launcher, layout, root) in saves_folder_candidates() {
+            match layout {
+                Layout::Direct => record(launcher, None, root),
+                Layout::Instances => {
+                    let Ok(entries) = fs::read_dir(&root) else {
+                        continue;
+                    };
+                    let mut instances: Vec<_> = entries
+                        .flatten()
+                        .filter(|entry| entry.path().is_dir())
+                        .collect();
+                    instances.sort_by_key(|entry| entry.file_name());
+                    for entry in instances {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        for suffix in INSTANCE_SAVES {
+                            let mut saves = entry.path();
+                            saves.extend(suffix.split('/'));
+                            record(launcher, Some(name.clone()), saves);
+                        }
+                    }
+                }
+            }
+        }
+
+        // The fullest folder first: on a computer with six instances, the one
+        // with the worlds in it is the one being looked for.
+        found.sort_by(|a, b| b.worlds.cmp(&a.worlds).then_with(|| a.path.cmp(&b.path)));
+        found
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// Every world in a saves folder, newest first.
 ///
 /// A world is a directory holding `level.dat`; anything else in the folder is
@@ -1878,11 +2169,38 @@ fn world_state(save_dir: String) -> WorldState {
         // session.lock -- even for an instant -- makes Minecraft drop the world
         // from the list it shows in the game.
         idle: world_is_busy(dir).map(|busy| !busy),
-        last_played: fs::metadata(dir.join("level.dat"))
-            .and_then(|meta| meta.modified())
-            .ok()
-            .map(|time| DateTime::<Local>::from(time).to_rfc3339()),
+        last_played: last_played_at(dir),
     }
+}
+
+/// When Minecraft itself last had this world open.
+///
+/// Minecraft stamps `LastPlayed` into level.dat, and that is the answer to ask
+/// for: it travels with the file. The file's own modified time does not -- it
+/// records when something last *wrote* level.dat, and a restore or a download
+/// writes it now, out of a backup taken hours ago. A world that had just come
+/// down from GitHub and had never been opened therefore reported itself as
+/// played since its newest backup, and the dashboard asked the player to back
+/// up an afternoon they had not had yet.
+///
+/// The timestamp is still the fallback, for the worlds too old or too modded
+/// to carry `LastPlayed`. There a fresh download does look like a fresh play,
+/// which is the wrong answer -- but no answer at all would leave a world that
+/// really has been played claiming to be backed up, which is worse.
+fn last_played_at(save_dir: &Path) -> Option<String> {
+    let recorded = read_world(save_dir)
+        .ok()
+        .and_then(|level| level.last_played)
+        .filter(|millis| *millis > 0)
+        .and_then(DateTime::<Utc>::from_timestamp_millis)
+        .map(|utc| utc.with_timezone(&Local));
+    if let Some(when) = recorded {
+        return Some(when.to_rfc3339());
+    }
+    fs::metadata(save_dir.join("level.dat"))
+        .and_then(|meta| meta.modified())
+        .ok()
+        .map(|time| DateTime::<Local>::from(time).to_rfc3339())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2636,6 +2954,7 @@ pub fn run() {
             list_local_branches,
             clone_save_from_cloud,
             default_saves_folder,
+            discover_saves_folders,
             list_worlds_in_folder,
             list_old_copies,
             tidy_old_copies,
@@ -2977,6 +3296,115 @@ mod tests {
             "a world with no session.lock is not in use"
         );
         assert!(state.last_played.is_some());
+    }
+
+    /// A `level.dat` holding nothing but the one field this cares about.
+    ///
+    /// Uncompressed NBT: Minecraft always gzips the file and MineCommit's
+    /// reader takes it either way, which keeps this to a handful of bytes with
+    /// no compressor in the test. The shape is the one a real level.dat has --
+    /// an unnamed root compound holding "Data".
+    fn level_dat_last_played(millis: i64) -> Vec<u8> {
+        let mut out = vec![0x0A, 0x00, 0x00];
+        out.push(0x0A);
+        out.extend(4u16.to_be_bytes());
+        out.extend(b"Data");
+        out.push(0x04);
+        out.extend(10u16.to_be_bytes());
+        out.extend(b"LastPlayed");
+        out.extend(millis.to_be_bytes());
+        out.push(0x00);
+        out.push(0x00);
+        out
+    }
+
+    /// The whole point of preferring Minecraft's own stamp. A world that has
+    /// just come down from GitHub has a level.dat written seconds ago out of a
+    /// backup taken hours ago, and the file's timestamp says only when it was
+    /// written. Reading it as a play time told the player they had built
+    /// something since their last backup on a world they had never opened.
+    #[test]
+    fn a_world_reports_when_minecraft_last_had_it_open_not_when_the_file_was_written() {
+        let save = tempfile::tempdir().expect("tempdir");
+        // 2026-08-24T13:10:20.812Z, hours before this file is being written.
+        fs::write(
+            save.path().join("level.dat"),
+            level_dat_last_played(1_787_577_020_812),
+        )
+        .unwrap();
+
+        let state = world_state(save.path().to_string_lossy().to_string());
+        let played = DateTime::parse_from_rfc3339(&state.last_played.expect("a play time"))
+            .expect("rfc3339");
+        assert_eq!(played.timestamp_millis(), 1_787_577_020_812);
+    }
+
+    /// Worlds too old or too modded to carry `LastPlayed` still have to answer
+    /// something: a world that really has been played must never sit in the
+    /// list claiming to be backed up.
+    #[test]
+    fn a_world_that_does_not_record_a_play_time_falls_back_to_the_file() {
+        let save = tempfile::tempdir().expect("tempdir");
+        fs::write(save.path().join("level.dat"), b"not nbt at all").unwrap();
+
+        let state = world_state(save.path().to_string_lossy().to_string());
+        assert!(state.last_played.is_some());
+    }
+
+    /// What decides whether a saves folder is worth offering. The copies a
+    /// restore leaves behind hold a level.dat like any other world, and
+    /// counting them would say a folder holds twice the worlds it does.
+    #[test]
+    fn a_saves_folder_is_counted_by_the_worlds_in_it() {
+        let saves = tempfile::tempdir().expect("tempdir");
+        for name in ["My World", "Another", "My World.1787384127276.snapshot"] {
+            fs::create_dir(saves.path().join(name)).unwrap();
+            fs::write(saves.path().join(name).join("level.dat"), b"nbt").unwrap();
+        }
+        fs::create_dir(saves.path().join("screenshots")).unwrap();
+
+        assert_eq!(count_worlds(saves.path()), 2);
+        assert_eq!(
+            count_worlds(&saves.path().join("nothing-here")),
+            0,
+            "a folder that is not there holds no worlds"
+        );
+    }
+
+    /// Every launcher forked from MultiMC puts a whole Minecraft inside each
+    /// instance, and they disagree on what it is called -- Prism writes
+    /// `minecraft` on Linux and `.minecraft` on Windows, while CurseForge and
+    /// Modrinth make the instance folder the install. Dropping any one of the
+    /// three loses every world of whoever uses that launcher.
+    #[test]
+    fn worlds_are_looked_for_in_every_shape_an_instance_takes() {
+        assert!(INSTANCE_SAVES.contains(&"saves"));
+        assert!(INSTANCE_SAVES.contains(&".minecraft/saves"));
+        assert!(INSTANCE_SAVES.contains(&"minecraft/saves"));
+    }
+
+    /// A guessed list, not a search: walking the disk for level.dat would find
+    /// every world including the ones inside backups and downloads, and take
+    /// long enough that nobody would wait. So the guesses have to be right, and
+    /// they have to reach past the plain vanilla install.
+    #[test]
+    fn the_launchers_people_use_are_all_looked_in() {
+        let candidates = saves_folder_candidates();
+        assert!(
+            !candidates.is_empty(),
+            "this platform must offer somewhere to look"
+        );
+        let launchers: Vec<&str> = candidates.iter().map(|(name, _, _)| *name).collect();
+        for expected in ["Minecraft", "Prism Launcher", "CurseForge", "Modrinth"] {
+            assert!(
+                launchers.contains(&expected),
+                "{expected} is not looked for; found {launchers:?}"
+            );
+        }
+        assert!(
+            candidates.iter().all(|(_, _, path)| path.is_absolute()),
+            "a relative guess would depend on where MineCommit was started from"
+        );
     }
 
     /// Reaches api.github.com, so it is not part of the normal suite. Run with

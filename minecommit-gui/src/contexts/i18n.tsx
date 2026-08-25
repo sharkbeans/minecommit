@@ -80,6 +80,9 @@ const en = {
   "dash.recheck": "Check again",
   "dash.checkNow": "Check every world now",
   "dash.checkedAgo": "checked {when}",
+  "dash.newer": "Newer",
+  "dash.older": "Older",
+  "dash.page": "Page {page} of {pages}",
 
   /* ── First run ──────────────────────────────────────────────────────── */
 
@@ -167,8 +170,9 @@ const en = {
   "world.seed": "Seed",
   "world.copySeed": "Copy",
   "world.copied": "Copied",
-  "world.spawn": "Spawn",
   "world.dataPacks": "Data packs",
+  "world.more": "More",
+  "world.less": "Less",
   "world.mode.survival": "Survival",
   "world.mode.creative": "Creative",
   "world.mode.adventure": "Adventure",
@@ -223,6 +227,15 @@ const en = {
   "add.download": "Download",
   "add.downloading": "Downloading…",
   "add.downloadingHelp": "A large world can take several minutes.",
+
+  /* ── Where the worlds actually are ──────────────────────────────────── */
+
+  "folders.title": "Worlds somewhere else on this PC",
+  "folders.body":
+    "MineCommit looked where the launchers keep their worlds and found these. Pick the one you play.",
+  "folders.use": "Use this",
+  "folders.oneWorld": "1 world",
+  "folders.worlds": "{count} worlds",
   "add.haveLink": "I was given a link instead",
   "add.usePicker": "Pick from my backup spaces",
   "add.cloudAddress": "Link",
@@ -481,6 +494,9 @@ const zhCN: Record<TranslationKey, string> = {
   "dash.recheck": "再检查一次",
   "dash.checkNow": "立即检查所有存档",
   "dash.checkedAgo": "{when}检查过",
+  "dash.newer": "更新的",
+  "dash.older": "更早的",
+  "dash.page": "第 {page} / {pages} 页",
 
   "welcome.title": "再也不会弄丢世界",
   "welcome.body":
@@ -556,8 +572,9 @@ const zhCN: Record<TranslationKey, string> = {
   "world.seed": "种子",
   "world.copySeed": "复制",
   "world.copied": "已复制",
-  "world.spawn": "出生点",
   "world.dataPacks": "数据包",
+  "world.more": "更多",
+  "world.less": "收起",
   "world.mode.survival": "生存",
   "world.mode.creative": "创造",
   "world.mode.adventure": "冒险",
@@ -605,6 +622,12 @@ const zhCN: Record<TranslationKey, string> = {
   "add.download": "下载",
   "add.downloading": "下载中…",
   "add.downloadingHelp": "大的存档可能需要几分钟。",
+
+  "folders.title": "这台电脑上别处的世界",
+  "folders.body": "MineCommit 在各个启动器存放世界的地方找到了这些。选你在玩的那个。",
+  "folders.use": "就用这个",
+  "folders.oneWorld": "1 个世界",
+  "folders.worlds": "{count} 个世界",
   "add.haveLink": "别人给了我一个链接",
   "add.usePicker": "从我的备份空间里选",
   "add.cloudAddress": "链接",

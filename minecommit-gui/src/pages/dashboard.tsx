@@ -5,6 +5,9 @@ import { openUrl } from "@tauri-apps/plugin-opener"
 import {
   AlertTriangle,
   Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CloudDownload,
   CloudOff,
   Folder,
@@ -45,6 +48,7 @@ import { useI18n, type TranslationKey } from "@/contexts/i18n"
 import { useSaves, type Save } from "@/contexts/saves"
 import {
   absoluteTime,
+  clock,
   cloudErrorLabel,
   difficultyName,
   fileSize,
@@ -73,6 +77,18 @@ import { cn } from "@/lib/utils"
 
 /** The note recorded when the player does not write one. */
 const DEFAULT_NOTE = "Backup"
+
+/**
+ * How many backups are listed at once.
+ *
+ * A world backed up after every session has hundreds of entries, and every one
+ * of them was drawn into a list with no bottom -- so the newest, which is the
+ * only one most people ever want, sat above a page that scrolled for a minute.
+ */
+const BACKUPS_PER_PAGE = 10
+
+/** How far back the history goes. Older than this, nobody is scrolling. */
+const HISTORY_LIMIT = 200
 
 type Busy = "backup" | "latest" | "restore" | null
 
@@ -131,6 +147,7 @@ export function DashboardPage() {
   const [historyByWorld, setHistoryByWorld] = useState<Record<string, HistoryEntry[]>>({})
   const [detailsByWorld, setDetailsByWorld] = useState<Record<string, WorldDetails>>({})
   const [note, setNote] = useState("")
+  const [historyPage, setHistoryPage] = useState(0)
   const [busy, setBusy] = useState<Busy>(null)
   const [outcome, setOutcome] = useState<Outcome | null>(null)
   const [statusError, setStatusError] = useState("")
@@ -302,7 +319,7 @@ export function DashboardPage() {
       const entries = await invoke<HistoryEntry[]>("list_history", {
         gitDir: selectedSave.repo_path,
         branch: selectedSave.default_branch || "main",
-        limit: 50,
+        limit: HISTORY_LIMIT,
       })
       setHistoryByWorld((current) => ({ ...current, [selectedSave.name]: entries }))
     } catch {
@@ -321,6 +338,8 @@ export function DashboardPage() {
       setSelectedSave(save)
       setOutcome(null)
       setNote("")
+      // Page four of the last world's backups is not page four of this one's.
+      setHistoryPage(0)
       // The previous world's failure says nothing about this one.
       setStatusError("")
       // Keeps "most recently played" meaningful, which is what the app opens on.
@@ -367,6 +386,13 @@ export function DashboardPage() {
   /* Derived ------------------------------------------------------------ */
 
   const history = selectedSave ? historyByWorld[selectedSave.name] ?? null : null
+  // Clamped rather than stored: a backup taken while page three is open
+  // lengthens the history, and a restore that rewinds it can shorten it out
+  // from under whichever page is showing.
+  const historyPages = Math.max(1, Math.ceil((history?.length ?? 0) / BACKUPS_PER_PAGE))
+  const page = Math.min(historyPage, historyPages - 1)
+  const firstOnPage = page * BACKUPS_PER_PAGE
+  const backupsOnPage = history?.slice(firstOnPage, firstOnPage + BACKUPS_PER_PAGE) ?? []
   const details = selectedSave ? detailsByWorld[selectedSave.name] : undefined
   // Space first, because until now these were only ever described as clutter in
   // the world list -- and the ones that are not in the world list, which is most
@@ -753,47 +779,76 @@ export function DashboardPage() {
                 ) : history.length === 0 ? (
                   <p className="py-3 text-sm text-muted-foreground">{t("dash.noHistory")}</p>
                 ) : (
-                  <ul className="flex flex-col divide-y">
-                    {history.map((entry, index) => (
-                      <li
-                        key={entry.id}
-                        className="group flex items-center gap-3 py-2.5"
-                      >
-                        <span
-                          className={cn(
-                            "size-2 shrink-0 rounded-full",
-                            index === 0 ? "bg-primary" : "bg-border"
-                          )}
-                        />
-                        <span className="min-w-0 flex-1">
+                  <>
+                    <ul className="flex flex-col divide-y">
+                      {backupsOnPage.map((entry, index) => (
+                        <li
+                          key={entry.id}
+                          className="group flex items-center gap-3 py-2.5"
+                        >
                           <span
-                            className="block truncate text-sm"
-                            title={absoluteTime(entry.timestamp, locale)}
+                            className={cn(
+                              "size-2 shrink-0 rounded-full",
+                              firstOnPage + index === 0 ? "bg-primary" : "bg-border"
+                            )}
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span
+                              className="block truncate text-sm"
+                              title={absoluteTime(entry.timestamp, locale)}
+                            >
+                              {relativeTime(entry.timestamp, locale)}
+                            </span>
+                            <span className="block truncate text-xs text-muted-foreground">
+                              {entry.device
+                                ? entry.device === thisDevice
+                                  ? t("dash.thisDevice")
+                                  : entry.device
+                                : t("dash.unknownDevice")}
+                              {entry.note && entry.note !== DEFAULT_NOTE ? ` · ${entry.note}` : ""}
+                            </span>
+                          </span>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-muted-foreground hover:text-foreground"
+                            onClick={() => setRestorePoint(entry)}
+                            disabled={busy !== null}
                           >
-                            {relativeTime(entry.timestamp, locale)}
-                          </span>
-                          <span className="block truncate text-xs text-muted-foreground">
-                            {entry.device
-                              ? entry.device === thisDevice
-                                ? t("dash.thisDevice")
-                                : entry.device
-                              : t("dash.unknownDevice")}
-                            {entry.note && entry.note !== DEFAULT_NOTE ? ` · ${entry.note}` : ""}
-                          </span>
+                            <RotateCcw data-icon="inline-start" />
+                            {t("dash.restore")}
+                          </Button>
+                        </li>
+                      ))}
+                    </ul>
+                    {/* Only where there is more than one page. A world with
+                        four backups should not be told which page it is on. */}
+                    {historyPages > 1 && (
+                      <div className="flex items-center justify-between gap-2 pt-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={page === 0}
+                          onClick={() => setHistoryPage(page - 1)}
+                        >
+                          <ChevronLeft data-icon="inline-start" />
+                          {t("dash.newer")}
+                        </Button>
+                        <span className="text-xs text-muted-foreground">
+                          {t("dash.page", { page: page + 1, pages: historyPages })}
                         </span>
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="text-muted-foreground hover:text-foreground"
-                          onClick={() => setRestorePoint(entry)}
-                          disabled={busy !== null}
+                          disabled={page >= historyPages - 1}
+                          onClick={() => setHistoryPage(page + 1)}
                         >
-                          <RotateCcw data-icon="inline-start" />
-                          {t("dash.restore")}
+                          {t("dash.older")}
+                          <ChevronRight data-icon="inline-end" />
                         </Button>
-                      </li>
-                    ))}
-                  </ul>
+                      </div>
+                    )}
+                  </>
                 )}
               </section>
             </div>
@@ -806,6 +861,7 @@ export function DashboardPage() {
         open={addOpen}
         onOpenChange={setAddOpen}
         savesFolder={savesFolder}
+        onSavesFolderChange={changeSavesFolder}
         account={account}
         accountLoaded={accountLoaded}
         onNeedSignIn={() => setSignInOpen(true)}
@@ -898,14 +954,6 @@ export function DashboardPage() {
 
 /** After this long, silence starts to look like a hang rather than work. */
 const SLOW_AFTER_SECONDS = 20
-
-function clock(seconds: number) {
-  if (seconds < 60) return `${seconds}s`
-  // "167m 43s" is a number the reader has to divide themselves. Past an hour,
-  // say hours.
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`
-  return `${Math.floor(seconds / 3600)}h ${String(Math.floor((seconds % 3600) / 60)).padStart(2, "0")}m`
-}
 
 /**
  * A first backup of a large world reads and hashes every region file, which can
@@ -1100,6 +1148,7 @@ function Flag({ label }: { label: string }) {
 function WorldDetailsSection({ details }: { details: WorldDetails | undefined }) {
   const { locale, t } = useI18n()
   const [copied, setCopied] = useState(false)
+  const [more, setMore] = useState(false)
 
   useEffect(() => {
     if (!copied) return
@@ -1111,6 +1160,9 @@ function WorldDetailsSection({ details }: { details: WorldDetails | undefined })
   const mode = gameModeName(level?.game_mode ?? null, t)
   const difficulty = difficultyName(level?.difficulty ?? null, t)
   const day = inGameDay(level)
+  // Nothing to open when the world records none of it, which is every world
+  // old enough or modded enough not to write these fields.
+  const hasMore = Boolean(level && (day !== null || level.seed || level.data_packs.length > 0))
 
   return (
     <section className="flex flex-col gap-2">
@@ -1159,25 +1211,17 @@ function WorldDetailsSection({ details }: { details: WorldDetails | undefined })
             </DetailRow>
           )}
 
-          {day !== null && (
+          {details && details.bytes > 0 && (
+            <DetailRow label={t("world.size")}>{fileSize(details.bytes)}</DetailRow>
+          )}
+
+          {more && day !== null && (
             <DetailRow label={t("world.age")}>
               {t("world.day", { day: day.toLocaleString(locale) })}
             </DetailRow>
           )}
 
-          {details && details.bytes > 0 && (
-            <DetailRow label={t("world.size")}>{fileSize(details.bytes)}</DetailRow>
-          )}
-
-          {level?.spawn && (
-            <DetailRow label={t("world.spawn")}>
-              <span className="font-mono text-xs">
-                {level.spawn[0]}, {level.spawn[1]}, {level.spawn[2]}
-              </span>
-            </DetailRow>
-          )}
-
-          {level?.seed && (
+          {more && level?.seed && (
             <DetailRow label={t("world.seed")}>
               <span className="flex min-w-0 items-baseline gap-2">
                 <span className="min-w-0 truncate font-mono text-xs select-all">
@@ -1200,7 +1244,7 @@ function WorldDetailsSection({ details }: { details: WorldDetails | undefined })
             </DetailRow>
           )}
 
-          {level && level.data_packs.length > 0 && (
+          {more && level && level.data_packs.length > 0 && (
             <DetailRow label={t("world.dataPacks")}>
               <span className="break-words">{level.data_packs.join(", ")}</span>
             </DetailRow>
@@ -1210,6 +1254,26 @@ function WorldDetailsSection({ details }: { details: WorldDetails | undefined })
 
       {details && !level && (
         <p className="text-sm text-muted-foreground">{t("world.detailsUnreadable")}</p>
+      )}
+
+      {/* What stays open is what tells one world from another at a glance. The
+          seed, the data packs and the in-game day are things a player goes
+          looking for on purpose, and keeping them open pushed the backups off
+          the bottom of the window. Spawn is gone: it is a coordinate the game
+          shows on its own compass, and nothing here is decided by it. */}
+      {hasMore && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="self-start text-muted-foreground hover:text-foreground"
+          onClick={() => setMore((open) => !open)}
+        >
+          <ChevronDown
+            data-icon="inline-start"
+            className={cn("transition-transform", more && "rotate-180")}
+          />
+          {more ? t("world.less") : t("world.more")}
+        </Button>
       )}
     </section>
   )

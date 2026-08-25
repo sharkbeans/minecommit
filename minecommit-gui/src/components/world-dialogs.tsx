@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog"
 import { openUrl } from "@tauri-apps/plugin-opener"
-import { ExternalLink, Loader2 } from "lucide-react"
+import { ExternalLink, FolderSearch, Loader2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -28,13 +28,17 @@ import {
 } from "@/components/ui/select"
 import { GithubMark, type GitHubAccount } from "@/components/github-account"
 import { GrassBlock } from "@/components/block-icon"
+import { TransferProgress } from "@/components/transfer-progress"
 import { useCommitAuthor } from "@/contexts/commit-author"
+import { useBackupProgress } from "@/hooks/use-backup-progress"
 import { localeOptions, useI18n, type Locale } from "@/contexts/i18n"
 import { useSaves, type Save } from "@/contexts/saves"
 import {
   cloudErrorLabel,
   fileSize,
   relativeTime,
+  savesFolderLabel,
+  type FoundSavesFolder,
   type FoundWorld,
   type GrantedRepository,
   type OldCopy,
@@ -55,6 +59,88 @@ function joinPath(folder: string, name: string) {
   return `${folder.replace(/[\\/]+$/, "")}${separator}${name}`
 }
 
+/* ── Finding where the worlds actually are ───────────────────────────────── */
+
+/**
+ * The saves folders on this computer, offered as a list to pick from.
+ *
+ * The saves folder is the one thing MineCommit cannot work out on its own, and
+ * the default it guesses is only right for somebody playing plain Minecraft
+ * from the official launcher. Anyone on a modpack has their worlds inside a
+ * launcher instance -- and nothing about an empty folder tells them that, so
+ * the app looks broken rather than looking in the wrong place. Every launcher
+ * installs to a documented spot, so the answer can simply be looked up.
+ *
+ * Nothing is shown until there is something to offer: the folder already in
+ * use is not a suggestion, and neither is a computer with one Minecraft on it.
+ */
+function SavesFolderFinder({
+  current,
+  onPick,
+}: {
+  current: string
+  onPick: (folder: string) => void
+}) {
+  const { t } = useI18n()
+  const [found, setFound] = useState<FoundSavesFolder[] | null>(null)
+
+  useEffect(() => {
+    let ignore = false
+    invoke<FoundSavesFolder[]>("discover_saves_folders")
+      .then((folders) => {
+        if (!ignore) setFound(folders)
+      })
+      .catch(() => {
+        if (!ignore) setFound([])
+      })
+    return () => {
+      ignore = true
+    }
+  }, [])
+
+  const elsewhere = useMemo(
+    () => (found ?? []).filter((folder) => folder.path !== current),
+    [current, found]
+  )
+
+  if (found === null || elsewhere.length === 0) return null
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border p-3">
+      <p className="flex items-center gap-2 text-sm font-medium">
+        <FolderSearch className="size-4 shrink-0 text-muted-foreground" />
+        {t("folders.title")}
+      </p>
+      <p className="text-xs text-muted-foreground">{t("folders.body")}</p>
+      <ul className="flex max-h-48 flex-col divide-y overflow-y-auto">
+        {elsewhere.map((folder) => (
+          <li key={folder.path} className="flex items-center gap-3 py-2">
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm">{savesFolderLabel(folder)}</span>
+              <span className="block truncate font-mono text-xs text-muted-foreground">
+                {folder.path}
+              </span>
+            </span>
+            <span className="shrink-0 text-xs text-muted-foreground">
+              {folder.worlds === 1
+                ? t("folders.oneWorld")
+                : t("folders.worlds", { count: folder.worlds })}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={() => onPick(folder.path)}
+            >
+              {t("folders.use")}
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 /* ── Add a world ─────────────────────────────────────────────────────────── */
 
 type AddTab = "local" | "cloud"
@@ -68,6 +154,7 @@ export function AddWorldDialog({
   open,
   onOpenChange,
   savesFolder,
+  onSavesFolderChange,
   account,
   accountLoaded,
   onNeedSignIn,
@@ -76,6 +163,7 @@ export function AddWorldDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
   savesFolder: string
+  onSavesFolderChange: (folder: string) => void
   account: GitHubAccount | null
   accountLoaded: boolean
   onNeedSignIn: () => void
@@ -112,6 +200,7 @@ export function AddWorldDialog({
         {tab === "local" ? (
           <AddFromThisPc
             savesFolder={savesFolder}
+            onSavesFolderChange={onSavesFolderChange}
             onAdded={(name) => {
               onOpenChange(false)
               onAdded(name)
@@ -139,9 +228,11 @@ export function AddWorldDialog({
 
 function AddFromThisPc({
   savesFolder,
+  onSavesFolderChange,
   onAdded,
 }: {
   savesFolder: string
+  onSavesFolderChange: (folder: string) => void
   onAdded: (name: string) => void
 }) {
   const { locale, t } = useI18n()
@@ -247,9 +338,15 @@ function AddFromThisPc({
     <>
       <div className="max-h-72 overflow-y-auto">
         {available.length === 0 ? (
-          <p className="py-6 text-sm text-muted-foreground">
-            {found.length === 0 ? t("add.noneFound") : t("add.allAdded")}
-          </p>
+          <div className="flex flex-col gap-3 py-4">
+            <p className="text-sm text-muted-foreground">
+              {found.length === 0 ? t("add.noneFound") : t("add.allAdded")}
+            </p>
+            {/* An empty folder is nearly always the wrong folder: the default
+                is only right for plain Minecraft from the official launcher,
+                and a modpack keeps its worlds inside a launcher instance. */}
+            <SavesFolderFinder current={savesFolder} onPick={onSavesFolderChange} />
+          </div>
         ) : (
           <ul className="flex flex-col">
             {available.map((world) => (
@@ -325,6 +422,7 @@ function AddFromCloud({
   const [pickedWorld, setPickedWorld] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const progress = useBackupProgress(busy)
 
   useEffect(() => {
     if (!account || byLink) return
@@ -548,8 +646,15 @@ function AddFromCloud({
         )}
       </FieldGroup>
 
+      {/* A world is minutes of download and then minutes of rebuilding, and
+          "Downloading…" beside a spinner for all of it is the same picture as
+          an app that has hung. The Rust side has been reporting how far along
+          it is the whole time; nothing here was listening. */}
       {busy && (
-        <p className="text-xs text-muted-foreground">{t("add.downloadingHelp")}</p>
+        <>
+          <TransferProgress progress={progress} fallback={t("add.downloading")} />
+          <p className="text-xs text-muted-foreground">{t("add.downloadingHelp")}</p>
+        </>
       )}
       {error && <p className="text-sm break-words text-destructive">{error}</p>}
 
@@ -903,6 +1008,7 @@ export function SettingsDialog({
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">{t("dash.savesFolderHelp")}</p>
+            <SavesFolderFinder current={savesFolder} onPick={onSavesFolderChange} />
           </Field>
           <Field>
             <Label htmlFor="settings-language">{t("settings.language")}</Label>
