@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.13.0 (2026-08-25)
+
+Changes
+
+- MineCommit can now find where your worlds actually are. The folder it guesses
+  is only right for plain Minecraft from the official launcher, and anyone
+  playing a modpack has their worlds inside a launcher instance instead --
+  where the app simply came back empty, with nothing to say it was looking in
+  the wrong place. It now looks in the documented spot for Prism Launcher,
+  MultiMC, PolyMC, CurseForge, Modrinth, ATLauncher, GDLauncher, Technic and
+  the FTB app, Flatpak installs included, and offers each folder it found with
+  the instance name and how many worlds are in it. Settings and "Add a world"
+  both show the list; it is a lookup of known locations, not a disk search.
+
+- Downloading a world from GitHub shows how far it has got. The Rust side has
+  been reporting this the whole time and nothing in that dialog was listening,
+  so a world that takes ten minutes to come down showed a spinner for all ten.
+
+- "About this world" is shorter. The seed, the data packs and the in-game day
+  are behind a "More", because they are things you go looking for on purpose,
+  and having them always open pushed the backups off the bottom of the window.
+  The spawn point is gone: it is a coordinate the game shows on its own.
+
+- Backups are listed ten at a time. A world backed up after every session had
+  hundreds of entries in one list with no bottom.
+
+Fixes
+
+- A world downloaded from GitHub and never opened said "You have played since
+  the last backup". The restore writes level.dat now, out of a backup taken
+  hours ago, and the file's timestamp was being read as a play time. Minecraft
+  stamps the real one inside level.dat, and that is what is read now -- it
+  travels with the file, which is the whole point.
+
 ## 0.12.2 (2026-08-24)
 
 Fixes
